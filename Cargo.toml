@@ -25,3 +25,19 @@ macaddr = "1.0"
 
 # Signal handling
 ctrlc = "3.4"
+
+# HTTP client for downloading netboot images
+reqwest = { version = "0.12", features = ["blocking"] }
+
+# SHA256 for verifying downloads
+sha2 = "0.10"
+
+# Tar extraction
+tar = "0.4"
+flate2 = "1.0"
+
+# Async runtime for TFTP/proxyDHCP servers
+tokio = { version = "1.0", features = ["full"] }
+
+# Socket2 for raw socket options
+socket2 = "0.5"
