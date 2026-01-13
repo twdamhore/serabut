@@ -1,0 +1,27 @@
+[package]
+name = "serabut"
+version = "0.1.0"
+edition = "2021"
+description = "DHCP PXE boot listener - monitors network for PXE boot requests"
+license = "MIT"
+
+[dependencies]
+# Packet capture
+pnet = "0.35"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# MAC address handling
+macaddr = "1.0"
+
+# Signal handling
+ctrlc = "3.4"
