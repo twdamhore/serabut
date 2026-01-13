@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use serabut::capture::PnetCapture;
-use serabut::netboot::NetbootManager;
+use serabut::netboot::{NetbootConfigs, NetbootManager};
 use serabut::proxydhcp::ProxyDhcpServer;
 use serabut::reporter::ConsoleReporter;
 use serabut::tftp::TftpServer;
@@ -26,11 +26,16 @@ use serabut::PxeListener;
 
 /// DHCP PXE Boot Server
 #[derive(Parser, Debug)]
-#[command(author, version, about = "PXE boot server for Ubuntu netboot", long_about = None)]
+#[command(author, version, about = "PXE boot server for netboot images", long_about = None)]
 struct Args {
     /// Network interface to listen on (required for server mode)
     #[arg(short, long)]
     interface: Option<String>,
+
+    /// Operating system to serve (default: ubuntu-24.04)
+    /// Use --list-os to see available options
+    #[arg(long, default_value = "ubuntu-24.04")]
+    os: String,
 
     /// Directory to store netboot files (default: /var/lib/serabut)
     #[arg(long, default_value = "/var/lib/serabut")]
@@ -51,6 +56,10 @@ struct Args {
     /// List available network interfaces and exit
     #[arg(long)]
     list_interfaces: bool,
+
+    /// List available operating systems and exit
+    #[arg(long)]
+    list_os: bool,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -83,6 +92,30 @@ fn main() {
         }
         return;
     }
+
+    // Handle --list-os
+    if args.list_os {
+        println!("Available operating systems:\n");
+        for config in NetbootConfigs::list() {
+            println!("  {:15} - {}", config.id, config.name);
+        }
+        println!("\nUse --os <id> to select an operating system.");
+        return;
+    }
+
+    // Get netboot configuration
+    let netboot_config = match NetbootConfigs::get(&args.os) {
+        Some(config) => config,
+        None => {
+            eprintln!("Error: Unknown operating system '{}'", args.os);
+            eprintln!("\nAvailable options:");
+            for id in NetbootConfigs::available_ids() {
+                eprintln!("  {}", id);
+            }
+            eprintln!("\nUse --list-os to see full descriptions.");
+            process::exit(1);
+        }
+    };
 
     // Global running flag for all threads
     let running = Arc::new(AtomicBool::new(true));
@@ -127,24 +160,23 @@ fn main() {
     };
 
     // Step 1: Download/verify netboot image (unless skipped or monitor-only)
-    let tftp_root = if !args.skip_download && !args.monitor_only {
-        info!("=== Checking for latest Ubuntu netboot image ===");
+    let (tftp_root, boot_file_bios, boot_file_efi) = if !args.skip_download && !args.monitor_only {
+        info!("=== Preparing {} netboot image ===", netboot_config.name);
 
-        let manager = NetbootManager::new(&args.data_dir);
+        let manager = NetbootManager::new(&args.data_dir, netboot_config.clone());
         match manager.ensure_netboot_ready() {
             Ok(root) => {
                 info!("Netboot files ready at: {}", root.display());
-                Some(root)
+                let bios = manager.config().boot_file_bios.clone();
+                let efi = manager.config().boot_file_efi.clone();
+                (Some(root), bios, efi)
             }
             Err(e) => {
                 error!("Failed to prepare netboot image: {}", e);
-                if !args.monitor_only {
-                    eprintln!("\nError: Could not prepare netboot image.");
-                    eprintln!("Use --skip-download to use existing files.");
-                    eprintln!("Use --monitor-only to just monitor PXE traffic.");
-                    process::exit(1);
-                }
-                None
+                eprintln!("\nError: Could not prepare netboot image.");
+                eprintln!("Use --skip-download to use existing files.");
+                eprintln!("Use --monitor-only to just monitor PXE traffic.");
+                process::exit(1);
             }
         }
     } else if args.skip_download && !args.monitor_only {
@@ -155,16 +187,12 @@ fn main() {
             process::exit(1);
         }
         info!("Using existing netboot files at: {}", tftp_root.display());
-        Some(tftp_root)
+        // Use boot files from config, but also check what's available
+        let (bios, efi) = detect_boot_files(&tftp_root);
+        (Some(tftp_root), bios, efi)
     } else {
-        None
-    };
-
-    // Determine boot filenames based on what's available
-    let (boot_file_bios, boot_file_efi) = if let Some(ref root) = tftp_root {
-        detect_boot_files(root)
-    } else {
-        ("pxelinux.0".to_string(), "grubnetx64.efi.signed".to_string())
+        // Monitor only mode
+        (None, netboot_config.boot_file_bios.clone(), netboot_config.boot_file_efi.clone())
     };
 
     info!("BIOS boot file: {}", boot_file_bios);

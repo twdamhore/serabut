@@ -1,6 +1,6 @@
 //! Netboot image manager.
 //!
-//! Downloads, verifies, and extracts Ubuntu netboot images.
+//! Downloads, verifies, and extracts netboot images for various operating systems.
 
 use std::fs::{self, File};
 use std::io::{BufReader, Read, Write};
@@ -12,14 +12,7 @@ use sha2::{Digest, Sha256};
 use tar::Archive;
 use tracing::{debug, info, warn};
 
-/// Base URL for Ubuntu releases.
-const UBUNTU_RELEASES_BASE: &str = "https://releases.ubuntu.com/24.04";
-
-/// Netboot tarball filename.
-const NETBOOT_FILENAME: &str = "ubuntu-24.04.2-netboot-amd64.tar.gz";
-
-/// SHA256SUMS filename.
-const SHA256SUMS_FILENAME: &str = "SHA256SUMS";
+use super::config::NetbootConfig;
 
 /// Manages netboot image downloads and verification.
 pub struct NetbootManager {
@@ -27,23 +20,35 @@ pub struct NetbootManager {
     data_dir: PathBuf,
     /// Directory where extracted TFTP files are served from.
     tftp_root: PathBuf,
+    /// Netboot configuration.
+    config: NetbootConfig,
 }
 
 impl NetbootManager {
-    /// Create a new netboot manager.
+    /// Create a new netboot manager with the given configuration.
     ///
     /// # Arguments
     /// * `data_dir` - Directory to store downloaded files
-    pub fn new(data_dir: impl AsRef<Path>) -> Self {
+    /// * `config` - Netboot image configuration
+    pub fn new(data_dir: impl AsRef<Path>, config: NetbootConfig) -> Self {
         let data_dir = data_dir.as_ref().to_path_buf();
         let tftp_root = data_dir.join("tftp");
 
-        Self { data_dir, tftp_root }
+        Self {
+            data_dir,
+            tftp_root,
+            config,
+        }
     }
 
     /// Get the TFTP root directory.
     pub fn tftp_root(&self) -> &Path {
         &self.tftp_root
+    }
+
+    /// Get the netboot configuration.
+    pub fn config(&self) -> &NetbootConfig {
+        &self.config
     }
 
     /// Ensure netboot image is downloaded and up to date.
@@ -56,89 +61,114 @@ impl NetbootManager {
         fs::create_dir_all(&self.tftp_root)
             .context("Failed to create TFTP root directory")?;
 
-        info!("Checking for latest Ubuntu 24.04 netboot image...");
+        info!("Checking for {} netboot image...", self.config.name);
 
-        // Fetch remote SHA256
-        let remote_sha256 = self.fetch_remote_sha256()?;
-        info!("Remote SHA256: {}", remote_sha256);
-
-        // Check if we have the tarball and if it matches
-        let tarball_path = self.data_dir.join(NETBOOT_FILENAME);
+        let archive_path = self.data_dir.join(&self.config.archive_filename);
         let mut need_download = true;
 
-        if tarball_path.exists() {
-            info!("Found existing netboot tarball, verifying...");
-            let local_sha256 = self.compute_sha256(&tarball_path)?;
-            debug!("Local SHA256: {}", local_sha256);
+        // Try to verify existing file
+        if archive_path.exists() {
+            info!("Found existing archive, verifying...");
 
-            if local_sha256 == remote_sha256 {
-                info!("Netboot image is up to date");
-                need_download = false;
+            if let Some(expected) = self.get_expected_sha256()? {
+                let local_sha256 = self.compute_sha256(&archive_path)?;
+                debug!("Local SHA256: {}", local_sha256);
+                debug!("Expected SHA256: {}", expected);
+
+                if local_sha256 == expected {
+                    info!("Archive is up to date");
+                    need_download = false;
+                } else {
+                    warn!("SHA256 mismatch, re-downloading...");
+                }
             } else {
-                warn!("SHA256 mismatch, re-downloading...");
+                // No SHA256 verification available, check if file is non-empty
+                let metadata = fs::metadata(&archive_path)?;
+                if metadata.len() > 0 {
+                    info!("Archive exists (no SHA256 verification available)");
+                    need_download = false;
+                }
             }
         } else {
-            info!("Netboot tarball not found, downloading...");
+            info!("Archive not found, downloading...");
         }
 
         if need_download {
-            // Download the tarball
-            self.download_netboot(&tarball_path)?;
+            self.download_archive(&archive_path)?;
 
-            // Verify the download
-            let local_sha256 = self.compute_sha256(&tarball_path)?;
-            if local_sha256 != remote_sha256 {
-                return Err(anyhow!(
-                    "SHA256 verification failed after download. Expected: {}, Got: {}",
-                    remote_sha256,
-                    local_sha256
-                ));
+            // Verify if possible
+            if let Some(expected) = self.get_expected_sha256()? {
+                let local_sha256 = self.compute_sha256(&archive_path)?;
+                if local_sha256 != expected {
+                    return Err(anyhow!(
+                        "SHA256 verification failed after download. Expected: {}, Got: {}",
+                        expected,
+                        local_sha256
+                    ));
+                }
+                info!("SHA256 verification passed");
             }
         }
 
         // Always extract to ensure files are correct
         // (in case they were modified externally)
-        info!("SHA256 verification passed");
-
-        // Extract the tarball
-        self.extract_netboot(&tarball_path)?;
+        self.extract_archive(&archive_path)?;
 
         Ok(self.tftp_root.clone())
     }
 
-    /// Fetch the SHA256 checksum for the netboot tarball from Ubuntu servers.
-    fn fetch_remote_sha256(&self) -> Result<String> {
-        let url = format!("{}/{}", UBUNTU_RELEASES_BASE, SHA256SUMS_FILENAME);
+    /// Get expected SHA256 hash for the archive.
+    fn get_expected_sha256(&self) -> Result<Option<String>> {
+        // First check if we have a hardcoded hash
+        if let Some(ref hash) = self.config.expected_sha256 {
+            return Ok(Some(hash.clone()));
+        }
+
+        // Try to fetch from SHA256SUMS
+        if let Some(url) = self.config.sha256sums_url() {
+            return self.fetch_sha256_from_sums(&url);
+        }
+
+        // No verification available
+        Ok(None)
+    }
+
+    /// Fetch SHA256 hash from a SHA256SUMS file.
+    fn fetch_sha256_from_sums(&self, url: &str) -> Result<Option<String>> {
         debug!("Fetching SHA256SUMS from {}", url);
 
-        let response = reqwest::blocking::get(&url)
-            .context("Failed to fetch SHA256SUMS")?;
+        let response = match reqwest::blocking::get(url) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("Could not fetch SHA256SUMS: {}", e);
+                return Ok(None);
+            }
+        };
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to fetch SHA256SUMS: HTTP {}",
-                response.status()
-            ));
+            warn!("SHA256SUMS not available: HTTP {}", response.status());
+            return Ok(None);
         }
 
         let body = response.text().context("Failed to read SHA256SUMS")?;
 
-        // Parse SHA256SUMS file to find our netboot tarball
+        // Parse SHA256SUMS file to find our archive
         for line in body.lines() {
             // Format: "sha256hash *filename" or "sha256hash  filename"
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let filename = parts[1].trim_start_matches('*');
-                if filename == NETBOOT_FILENAME {
-                    return Ok(parts[0].to_lowercase());
+                if filename == self.config.archive_filename {
+                    return Ok(Some(parts[0].to_lowercase()));
                 }
             }
         }
 
-        Err(anyhow!(
+        warn!(
             "Could not find {} in SHA256SUMS",
-            NETBOOT_FILENAME
-        ))
+            self.config.archive_filename
+        );
+        Ok(None)
     }
 
     /// Compute SHA256 hash of a file.
@@ -151,7 +181,8 @@ impl NetbootManager {
         let mut buffer = [0u8; 8192];
 
         loop {
-            let bytes_read = reader.read(&mut buffer)
+            let bytes_read = reader
+                .read(&mut buffer)
                 .context("Failed to read file for hashing")?;
             if bytes_read == 0 {
                 break;
@@ -163,19 +194,16 @@ impl NetbootManager {
         Ok(format!("{:x}", hash))
     }
 
-    /// Download the netboot tarball.
-    fn download_netboot(&self, dest: &Path) -> Result<()> {
-        let url = format!("{}/{}", UBUNTU_RELEASES_BASE, NETBOOT_FILENAME);
+    /// Download the archive.
+    fn download_archive(&self, dest: &Path) -> Result<()> {
+        let url = self.config.archive_url();
         info!("Downloading {} ...", url);
 
-        let response = reqwest::blocking::get(&url)
-            .context("Failed to start download")?;
+        let response =
+            reqwest::blocking::get(&url).context("Failed to start download")?;
 
         if !response.status().is_success() {
-            return Err(anyhow!(
-                "Failed to download: HTTP {}",
-                response.status()
-            ));
+            return Err(anyhow!("Failed to download: HTTP {}", response.status()));
         }
 
         let total_size = response.content_length();
@@ -193,34 +221,59 @@ impl NetbootManager {
         Ok(())
     }
 
-    /// Check if netboot files are already extracted.
-    fn is_extracted(&self) -> bool {
-        // Check for key files that should exist after extraction
-        let pxelinux = self.tftp_root.join("pxelinux.0");
-        let ldlinux = self.tftp_root.join("ldlinux.c32");
-
-        pxelinux.exists() || ldlinux.exists()
-    }
-
-    /// Extract the netboot tarball to TFTP root.
-    fn extract_netboot(&self, tarball: &Path) -> Result<()> {
-        info!("Extracting netboot files to {} ...", self.tftp_root.display());
+    /// Extract the archive to TFTP root.
+    fn extract_archive(&self, archive_path: &Path) -> Result<()> {
+        info!(
+            "Extracting netboot files to {} ...",
+            self.tftp_root.display()
+        );
 
         // Clear existing files
         if self.tftp_root.exists() {
-            fs::remove_dir_all(&self.tftp_root)
-                .context("Failed to clear TFTP root")?;
+            fs::remove_dir_all(&self.tftp_root).context("Failed to clear TFTP root")?;
         }
-        fs::create_dir_all(&self.tftp_root)
-            .context("Failed to create TFTP root")?;
+        fs::create_dir_all(&self.tftp_root).context("Failed to create TFTP root")?;
 
-        let file = File::open(tarball)
-            .with_context(|| format!("Failed to open {}", tarball.display()))?;
+        // Determine extraction method based on file extension
+        let filename = self.config.archive_filename.to_lowercase();
+
+        if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
+            self.extract_tar_gz(archive_path)?;
+        } else if filename.ends_with(".tar") {
+            self.extract_tar(archive_path)?;
+        } else {
+            // Not an archive, just copy the file directly
+            self.copy_single_file(archive_path)?;
+        }
+
+        info!("Extraction complete");
+        self.list_boot_files()?;
+
+        Ok(())
+    }
+
+    /// Extract a .tar.gz archive.
+    fn extract_tar_gz(&self, archive_path: &Path) -> Result<()> {
+        let file = File::open(archive_path)
+            .with_context(|| format!("Failed to open {}", archive_path.display()))?;
 
         let decoder = GzDecoder::new(file);
         let mut archive = Archive::new(decoder);
 
-        // Extract all files
+        self.extract_tar_entries(&mut archive)
+    }
+
+    /// Extract a .tar archive.
+    fn extract_tar(&self, archive_path: &Path) -> Result<()> {
+        let file = File::open(archive_path)
+            .with_context(|| format!("Failed to open {}", archive_path.display()))?;
+
+        let mut archive = Archive::new(file);
+        self.extract_tar_entries(&mut archive)
+    }
+
+    /// Extract entries from a tar archive.
+    fn extract_tar_entries<R: Read>(&self, archive: &mut Archive<R>) -> Result<()> {
         for entry in archive.entries().context("Failed to read archive")? {
             let mut entry = entry.context("Failed to read archive entry")?;
             let path = entry.path().context("Failed to get entry path")?;
@@ -237,26 +290,33 @@ impl NetbootManager {
 
             // Create parent directories
             if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create directory {}", parent.display()))?;
+                fs::create_dir_all(parent).with_context(|| {
+                    format!("Failed to create directory {}", parent.display())
+                })?;
             }
 
             // Extract the file
             if entry.header().entry_type().is_file() {
-                entry.unpack(&dest_path)
+                entry
+                    .unpack(&dest_path)
                     .with_context(|| format!("Failed to extract {}", dest_path.display()))?;
                 debug!("Extracted: {}", dest_path.display());
             } else if entry.header().entry_type().is_dir() {
-                fs::create_dir_all(&dest_path)
-                    .with_context(|| format!("Failed to create directory {}", dest_path.display()))?;
+                fs::create_dir_all(&dest_path).with_context(|| {
+                    format!("Failed to create directory {}", dest_path.display())
+                })?;
             }
         }
 
-        info!("Extraction complete");
+        Ok(())
+    }
 
-        // List key files
-        self.list_boot_files()?;
-
+    /// Copy a single file (for non-archive downloads like initrd.img).
+    fn copy_single_file(&self, src: &Path) -> Result<()> {
+        let dest = self.tftp_root.join(&self.config.archive_filename);
+        fs::copy(src, &dest)
+            .with_context(|| format!("Failed to copy {} to {}", src.display(), dest.display()))?;
+        info!("Copied: {}", dest.display());
         Ok(())
     }
 
@@ -271,6 +331,9 @@ impl NetbootManager {
             "grubnetx64.efi.signed",
             "grubx64.efi",
             "bootnetx64.efi",
+            "vmlinuz",
+            "initrd.img",
+            "initrd",
         ];
 
         for filename in important_files {
@@ -296,11 +359,17 @@ impl NetbootManager {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    let name = path.file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
-                    if name == "grub" || name == "pxelinux.cfg" || name == "casper" {
-                        info!("  - {}/", path.strip_prefix(&self.tftp_root).unwrap_or(&path).display());
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if name == "grub"
+                        || name == "pxelinux.cfg"
+                        || name == "casper"
+                        || name == "EFI"
+                        || name == "boot"
+                    {
+                        info!(
+                            "  - {}/",
+                            path.strip_prefix(&self.tftp_root).unwrap_or(&path).display()
+                        );
                         self.scan_boot_directory(&path, depth + 1)?;
                     }
                 }
@@ -313,18 +382,27 @@ impl NetbootManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::env;
+    use crate::netboot::NetbootConfigs;
 
     #[test]
     fn test_new() {
-        let manager = NetbootManager::new("/tmp/test-netboot");
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp/test-netboot", config);
         assert_eq!(manager.data_dir, PathBuf::from("/tmp/test-netboot"));
         assert_eq!(manager.tftp_root, PathBuf::from("/tmp/test-netboot/tftp"));
     }
 
     #[test]
     fn test_tftp_root() {
-        let manager = NetbootManager::new("/var/lib/serabut");
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/var/lib/serabut", config);
         assert_eq!(manager.tftp_root(), Path::new("/var/lib/serabut/tftp"));
+    }
+
+    #[test]
+    fn test_config() {
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp/test", config);
+        assert_eq!(manager.config().id, "ubuntu-24.04");
     }
 }

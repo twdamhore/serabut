@@ -1,19 +1,32 @@
 # Serabut
 
-A PXE boot server that automatically downloads Ubuntu netboot images and serves them to PXE clients using proxyDHCP. Works alongside your existing DHCP server.
+A PXE boot server that automatically downloads netboot images and serves them to PXE clients using proxyDHCP. Works alongside your existing DHCP server.
 
 ## Features
 
-- **Automatic netboot download**: Fetches Ubuntu 24.04 netboot images from releases.ubuntu.com
+- **Multiple OS support**: Ubuntu, Debian, Rocky Linux, AlmaLinux (extensible)
+- **Automatic netboot download**: Fetches netboot images from official sources
 - **SHA256 verification**: Verifies downloads against official checksums
 - **TFTP server**: Built-in TFTP server for serving boot files
 - **ProxyDHCP**: Works with existing DHCP servers - no need to replace your router
 - **PXE monitoring**: Real-time logging of all PXE boot activity
 - **Multi-architecture**: Supports both BIOS and UEFI clients
 
+## Supported Operating Systems
+
+| ID | Name |
+|----|------|
+| `ubuntu-24.04` | Ubuntu 24.04 LTS (Noble Numbat) |
+| `ubuntu-22.04` | Ubuntu 22.04 LTS (Jammy Jellyfish) |
+| `debian-12` | Debian 12 (Bookworm) |
+| `rocky-9` | Rocky Linux 9 |
+| `alma-9` | AlmaLinux 9 |
+
+Use `--list-os` to see all available options.
+
 ## How It Works
 
-1. **Startup**: Downloads and verifies the latest Ubuntu netboot image
+1. **Startup**: Downloads and verifies the selected netboot image
 2. **TFTP Server**: Serves boot files (pxelinux.0, grubnetx64.efi.signed, etc.)
 3. **ProxyDHCP**: Responds to PXE clients with boot server info
 4. **Monitor**: Logs all PXE boot requests and responses
@@ -39,11 +52,18 @@ cargo build --release
 ### Full PXE Boot Server
 
 ```bash
-# Specify the network interface to use
+# Serve Ubuntu 24.04 (default)
 sudo ./target/release/serabut -i eth0
+
+# Serve a different OS
+sudo ./target/release/serabut -i eth0 --os debian-12
+sudo ./target/release/serabut -i eth0 --os rocky-9
 
 # Use custom data directory
 sudo ./target/release/serabut -i eth0 --data-dir /opt/pxe
+
+# List available operating systems
+./target/release/serabut --list-os
 ```
 
 ### Monitor Only Mode
@@ -65,6 +85,7 @@ sudo ./target/release/serabut -i eth0 --skip-download
 | Option | Description |
 |--------|-------------|
 | `-i, --interface <NAME>` | Network interface (required for server mode, derives IP automatically) |
+| `--os <ID>` | Operating system to serve (default: ubuntu-24.04) |
 | `--data-dir <PATH>` | Directory for netboot files (default: /var/lib/serabut) |
 | `--tftp-port <PORT>` | TFTP server port (default: 69) |
 | `--skip-download` | Skip netboot download, use existing files |
@@ -72,6 +93,7 @@ sudo ./target/release/serabut -i eth0 --skip-download
 | `-v, --verbose` | Enable verbose output |
 | `--no-color` | Disable colored output |
 | `--list-interfaces` | List available network interfaces and exit |
+| `--list-os` | List available operating systems and exit |
 | `-h, --help` | Print help |
 | `-V, --version` | Print version |
 
