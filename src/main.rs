@@ -28,13 +28,9 @@ use serabut::PxeListener;
 #[derive(Parser, Debug)]
 #[command(author, version, about = "PXE boot server for Ubuntu netboot", long_about = None)]
 struct Args {
-    /// Network interface to listen on (default: auto-detect)
+    /// Network interface to listen on (required for server mode)
     #[arg(short, long)]
     interface: Option<String>,
-
-    /// Server IP address (required for proxyDHCP and TFTP)
-    #[arg(long)]
-    server_ip: Option<Ipv4Addr>,
 
     /// Directory to store netboot files (default: /var/lib/serabut)
     #[arg(long, default_value = "/var/lib/serabut")]
@@ -101,26 +97,33 @@ fn main() {
         .expect("Error setting Ctrl-C handler");
     }
 
-    // Determine server IP
-    let server_ip = match args.server_ip {
-        Some(ip) => ip,
-        None => {
-            // Try to auto-detect from interface
-            match detect_server_ip(&args.interface) {
-                Some(ip) => {
-                    info!("Auto-detected server IP: {}", ip);
-                    ip
-                }
-                None => {
-                    if !args.monitor_only {
-                        eprintln!("Error: Could not auto-detect server IP.");
-                        eprintln!("Use --server-ip <IP> to specify your server's IP address.");
+    // For server mode, require an interface and derive IP from it
+    let server_ip = if !args.monitor_only {
+        match &args.interface {
+            Some(iface_name) => {
+                match get_interface_ip(iface_name) {
+                    Some(ip) => {
+                        info!("Using interface {} with IP {}", iface_name, ip);
+                        ip
+                    }
+                    None => {
+                        eprintln!("Error: Could not get IP address for interface '{}'.", iface_name);
+                        eprintln!("Make sure the interface exists and has an IPv4 address.");
+                        eprintln!("\nUse --list-interfaces to see available interfaces.");
                         process::exit(1);
                     }
-                    Ipv4Addr::UNSPECIFIED
                 }
             }
+            None => {
+                eprintln!("Error: Server mode requires an interface to be specified.");
+                eprintln!("Use --interface <name> to specify the network interface.");
+                eprintln!("Use --list-interfaces to see available interfaces.");
+                eprintln!("\nOr use --monitor-only to just observe PXE traffic.");
+                process::exit(1);
+            }
         }
+    } else {
+        Ipv4Addr::UNSPECIFIED
     };
 
     // Step 1: Download/verify netboot image (unless skipped or monitor-only)
@@ -285,36 +288,28 @@ fn main() {
     info!("Shutdown complete");
 }
 
-/// Detect server IP from network interface.
-fn detect_server_ip(interface: &Option<String>) -> Option<Ipv4Addr> {
+/// Get the IPv4 address for a specific network interface.
+fn get_interface_ip(interface_name: &str) -> Option<Ipv4Addr> {
     use pnet::datalink;
 
     let interfaces = datalink::interfaces();
 
-    let target_interface = if let Some(name) = interface {
-        interfaces.iter().find(|iface| &iface.name == name)
-    } else {
-        // Find first non-loopback interface with an IPv4 address
-        interfaces.iter().find(|iface| {
-            !iface.is_loopback()
-                && iface.is_up()
-                && iface.ips.iter().any(|ip| ip.is_ipv4())
-        })
-    };
-
-    target_interface.and_then(|iface| {
-        iface
-            .ips
-            .iter()
-            .find_map(|ip| {
-                if let std::net::IpAddr::V4(v4) = ip.ip() {
-                    if !v4.is_loopback() {
-                        return Some(v4);
+    interfaces
+        .iter()
+        .find(|iface| iface.name == interface_name)
+        .and_then(|iface| {
+            iface
+                .ips
+                .iter()
+                .find_map(|ip| {
+                    if let std::net::IpAddr::V4(v4) = ip.ip() {
+                        if !v4.is_loopback() {
+                            return Some(v4);
+                        }
                     }
-                }
-                None
-            })
-    })
+                    None
+                })
+        })
 }
 
 /// Detect available boot files in TFTP root.

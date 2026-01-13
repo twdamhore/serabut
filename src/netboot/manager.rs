@@ -64,6 +64,7 @@ impl NetbootManager {
 
         // Check if we have the tarball and if it matches
         let tarball_path = self.data_dir.join(NETBOOT_FILENAME);
+        let mut need_download = true;
 
         if tarball_path.exists() {
             info!("Found existing netboot tarball, verifying...");
@@ -72,12 +73,7 @@ impl NetbootManager {
 
             if local_sha256 == remote_sha256 {
                 info!("Netboot image is up to date");
-
-                // Check if already extracted
-                if self.is_extracted() {
-                    info!("Netboot files already extracted");
-                    return Ok(self.tftp_root.clone());
-                }
+                need_download = false;
             } else {
                 warn!("SHA256 mismatch, re-downloading...");
             }
@@ -85,18 +81,23 @@ impl NetbootManager {
             info!("Netboot tarball not found, downloading...");
         }
 
-        // Download the tarball
-        self.download_netboot(&tarball_path)?;
+        if need_download {
+            // Download the tarball
+            self.download_netboot(&tarball_path)?;
 
-        // Verify the download
-        let local_sha256 = self.compute_sha256(&tarball_path)?;
-        if local_sha256 != remote_sha256 {
-            return Err(anyhow!(
-                "SHA256 verification failed after download. Expected: {}, Got: {}",
-                remote_sha256,
-                local_sha256
-            ));
+            // Verify the download
+            let local_sha256 = self.compute_sha256(&tarball_path)?;
+            if local_sha256 != remote_sha256 {
+                return Err(anyhow!(
+                    "SHA256 verification failed after download. Expected: {}, Got: {}",
+                    remote_sha256,
+                    local_sha256
+                ));
+            }
         }
+
+        // Always extract to ensure files are correct
+        // (in case they were modified externally)
         info!("SHA256 verification passed");
 
         // Extract the tarball

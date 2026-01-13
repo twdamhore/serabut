@@ -39,14 +39,11 @@ cargo build --release
 ### Full PXE Boot Server
 
 ```bash
-# Auto-detect interface and server IP
-sudo ./target/release/serabut
-
-# Specify server IP explicitly
-sudo ./target/release/serabut --server-ip 192.168.1.100
+# Specify the network interface to use
+sudo ./target/release/serabut -i eth0
 
 # Use custom data directory
-sudo ./target/release/serabut --data-dir /opt/pxe
+sudo ./target/release/serabut -i eth0 --data-dir /opt/pxe
 ```
 
 ### Monitor Only Mode
@@ -60,15 +57,14 @@ sudo ./target/release/serabut --monitor-only
 
 ```bash
 # Use existing netboot files (skip download check)
-sudo ./target/release/serabut --skip-download
+sudo ./target/release/serabut -i eth0 --skip-download
 ```
 
 ## Command Line Options
 
 | Option | Description |
 |--------|-------------|
-| `-i, --interface <NAME>` | Network interface to listen on (default: auto-detect) |
-| `--server-ip <IP>` | Server IP address for TFTP/proxyDHCP |
+| `-i, --interface <NAME>` | Network interface (required for server mode, derives IP automatically) |
 | `--data-dir <PATH>` | Directory for netboot files (default: /var/lib/serabut) |
 | `--tftp-port <PORT>` | TFTP server port (default: 69) |
 | `--skip-download` | Skip netboot download, use existing files |
