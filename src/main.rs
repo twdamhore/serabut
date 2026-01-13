@@ -18,7 +18,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use serabut::capture::PnetCapture;
-use serabut::netboot::{NetbootConfigs, NetbootManager};
+use serabut::http::CloudInitServer;
+use serabut::netboot::{AutoinstallConfig, BootloaderConfigGenerator, NetbootConfigs, NetbootManager};
 use serabut::proxydhcp::ProxyDhcpServer;
 use serabut::reporter::ConsoleReporter;
 use serabut::tftp::TftpServer;
@@ -68,6 +69,19 @@ struct Args {
     /// Disable colored output
     #[arg(long)]
     no_color: bool,
+
+    /// Enable Ubuntu autoinstall with cloud-init
+    /// Starts HTTP server and configures bootloader for autoinstall
+    #[arg(long)]
+    autoinstall: bool,
+
+    /// Path to user-data file for autoinstall (cloud-init format)
+    #[arg(long)]
+    user_data: Option<PathBuf>,
+
+    /// Port for cloud-init HTTP server (default: 8080)
+    #[arg(long, default_value = "8080")]
+    http_port: u16,
 }
 
 fn main() {
@@ -198,7 +212,79 @@ fn main() {
     info!("BIOS boot file: {}", boot_file_bios);
     info!("EFI boot file: {}", boot_file_efi);
 
-    // Step 2: Start TFTP server (unless monitor-only)
+    // Step 2: Set up autoinstall if enabled
+    let http_handle = if args.autoinstall && !args.monitor_only {
+        info!("=== Configuring autoinstall ===");
+
+        // Build HTTP server URL
+        let http_addr = SocketAddr::V4(SocketAddrV4::new(
+            Ipv4Addr::UNSPECIFIED,
+            args.http_port,
+        ));
+
+        // Create cloud-init data directory
+        let cloud_init_dir = args.data_dir.join("cloud-init");
+        if !cloud_init_dir.exists() {
+            std::fs::create_dir_all(&cloud_init_dir).expect("Failed to create cloud-init directory");
+        }
+
+        // Build autoinstall URL using server IP
+        let autoinstall_url = format!("http://{}:{}/", server_ip, args.http_port);
+        info!("Autoinstall datasource URL: {}", autoinstall_url);
+
+        // Create autoinstall config
+        let autoinstall_config = AutoinstallConfig::new(&autoinstall_url);
+
+        // Generate bootloader configs with autoinstall parameters
+        if let Some(ref root) = tftp_root {
+            let generator = BootloaderConfigGenerator::new(root)
+                .with_autoinstall(autoinstall_config);
+
+            if let Err(e) = generator.generate() {
+                warn!("Failed to generate bootloader configs: {}", e);
+            } else {
+                info!("Generated bootloader configs with autoinstall parameters");
+            }
+        }
+
+        // Create HTTP server
+        let mut http_server = CloudInitServer::new(&cloud_init_dir, http_addr);
+
+        // Load user-data if provided
+        if let Some(ref user_data_path) = args.user_data {
+            if let Err(e) = http_server.load_user_data(user_data_path) {
+                warn!("Failed to load user-data: {}", e);
+            } else {
+                info!("Loaded user-data from: {}", user_data_path.display());
+            }
+        }
+
+        let http_running = http_server.running_flag();
+        let global_running = running.clone();
+
+        info!("=== Starting cloud-init HTTP server ===");
+        let handle = thread::spawn(move || {
+            if let Err(e) = http_server.run() {
+                error!("HTTP server error: {}", e);
+            }
+        });
+
+        // Link HTTP running to global running
+        let http_running_clone = http_running.clone();
+        thread::spawn(move || {
+            while global_running.load(Ordering::SeqCst) {
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
+            http_running_clone.store(false, Ordering::SeqCst);
+        });
+
+        Some(handle)
+    } else {
+        None
+    };
+
+    // Step 3: Start TFTP server (unless monitor-only)
+    #[allow(clippy::manual_map)]
     let tftp_handle = if !args.monitor_only {
         if let Some(ref root) = tftp_root {
             let tftp_addr = SocketAddr::V4(SocketAddrV4::new(
@@ -234,7 +320,7 @@ fn main() {
         None
     };
 
-    // Step 3: Start proxyDHCP server (unless monitor-only)
+    // Step 4: Start proxyDHCP server (unless monitor-only)
     let proxydhcp_handle = if !args.monitor_only && server_ip != Ipv4Addr::UNSPECIFIED {
         let proxy_server = ProxyDhcpServer::new(
             server_ip,
@@ -268,7 +354,7 @@ fn main() {
         None
     };
 
-    // Step 4: Start PXE monitor
+    // Step 5: Start PXE monitor
     info!("=== Starting PXE boot monitor ===");
 
     // Create the capture backend
@@ -306,6 +392,9 @@ fn main() {
     }
 
     // Wait for other servers to stop
+    if let Some(handle) = http_handle {
+        let _ = handle.join();
+    }
     if let Some(handle) = tftp_handle {
         let _ = handle.join();
     }
