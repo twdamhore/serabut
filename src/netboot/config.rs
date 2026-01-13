@@ -67,22 +67,7 @@ impl NetbootConfigs {
             name: "Ubuntu 24.04 LTS (Noble Numbat)".to_string(),
             id: "ubuntu-24.04".to_string(),
             base_url: "https://releases.ubuntu.com/24.04".to_string(),
-            archive_filename: "ubuntu-24.04.2-netboot-amd64.tar.gz".to_string(),
-            sha256sums_filename: Some("SHA256SUMS".to_string()),
-            expected_sha256: None,
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubnetx64.efi.signed".to_string(),
-            arch: NetbootArch::Amd64,
-        }
-    }
-
-    /// Ubuntu 22.04 LTS (Jammy Jellyfish) - amd64
-    pub fn ubuntu_22_04() -> NetbootConfig {
-        NetbootConfig {
-            name: "Ubuntu 22.04 LTS (Jammy Jellyfish)".to_string(),
-            id: "ubuntu-22.04".to_string(),
-            base_url: "https://releases.ubuntu.com/22.04".to_string(),
-            archive_filename: "ubuntu-22.04.5-netboot-amd64.tar.gz".to_string(),
+            archive_filename: "ubuntu-24.04.3-netboot-amd64.tar.gz".to_string(),
             sha256sums_filename: Some("SHA256SUMS".to_string()),
             expected_sha256: None,
             boot_file_bios: "pxelinux.0".to_string(),
@@ -171,7 +156,6 @@ impl NetbootConfigs {
     pub fn get(id: &str) -> Option<NetbootConfig> {
         match id {
             "ubuntu-24.04" | "ubuntu" => Some(Self::ubuntu_24_04()),
-            "ubuntu-22.04" => Some(Self::ubuntu_22_04()),
             "rocky-9" => Some(Self::rocky_9()),
             "rocky-10" | "rocky" => Some(Self::rocky_10()),
             "alma-9" => Some(Self::alma_9()),
@@ -185,7 +169,6 @@ impl NetbootConfigs {
     pub fn list() -> Vec<NetbootConfig> {
         vec![
             Self::ubuntu_24_04(),
-            Self::ubuntu_22_04(),
             Self::debian_12(),
             Self::rocky_9(),
             Self::rocky_10(),
@@ -198,7 +181,6 @@ impl NetbootConfigs {
     pub fn available_ids() -> Vec<&'static str> {
         vec![
             "ubuntu-24.04",
-            "ubuntu-22.04",
             "debian-12",
             "rocky-9",
             "rocky-10",
@@ -222,15 +204,6 @@ mod tests {
         assert_eq!(config.boot_file_bios, "pxelinux.0");
         assert_eq!(config.boot_file_efi, "grubnetx64.efi.signed");
         assert_eq!(config.arch, NetbootArch::Amd64);
-    }
-
-    #[test]
-    fn test_ubuntu_22_04_config() {
-        let config = NetbootConfigs::ubuntu_22_04();
-        assert_eq!(config.id, "ubuntu-22.04");
-        assert_eq!(config.name, "Ubuntu 22.04 LTS (Jammy Jellyfish)");
-        assert!(config.archive_url().contains("ubuntu-22.04"));
-        assert!(config.sha256sums_url().is_some());
     }
 
     #[test]
@@ -287,7 +260,6 @@ mod tests {
     fn test_get_by_id() {
         assert!(NetbootConfigs::get("ubuntu-24.04").is_some());
         assert!(NetbootConfigs::get("ubuntu").is_some());
-        assert!(NetbootConfigs::get("ubuntu-22.04").is_some());
         assert!(NetbootConfigs::get("rocky-9").is_some());
         assert!(NetbootConfigs::get("rocky-10").is_some());
         assert!(NetbootConfigs::get("rocky").is_some());
@@ -318,9 +290,8 @@ mod tests {
     #[test]
     fn test_list() {
         let configs = NetbootConfigs::list();
-        assert_eq!(configs.len(), 7);
+        assert_eq!(configs.len(), 6);
         assert!(configs.iter().any(|c| c.id == "ubuntu-24.04"));
-        assert!(configs.iter().any(|c| c.id == "ubuntu-22.04"));
         assert!(configs.iter().any(|c| c.id == "debian-12"));
         assert!(configs.iter().any(|c| c.id == "rocky-9"));
         assert!(configs.iter().any(|c| c.id == "rocky-10"));
@@ -331,9 +302,8 @@ mod tests {
     #[test]
     fn test_available_ids() {
         let ids = NetbootConfigs::available_ids();
-        assert_eq!(ids.len(), 7);
+        assert_eq!(ids.len(), 6);
         assert!(ids.contains(&"ubuntu-24.04"));
-        assert!(ids.contains(&"ubuntu-22.04"));
         assert!(ids.contains(&"debian-12"));
         assert!(ids.contains(&"rocky-9"));
         assert!(ids.contains(&"rocky-10"));

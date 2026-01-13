@@ -18,7 +18,6 @@ A PXE boot server that automatically downloads netboot images and serves them to
 | ID | Name |
 |----|------|
 | `ubuntu-24.04` | Ubuntu 24.04 LTS (Noble Numbat) |
-| `ubuntu-22.04` | Ubuntu 22.04 LTS (Jammy Jellyfish) |
 | `debian-12` | Debian 12 (Bookworm) |
 | `rocky-9` | Rocky Linux 9 |
 | `rocky-10` | Rocky Linux 10 |
