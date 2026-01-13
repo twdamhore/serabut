@@ -27,7 +27,7 @@ macaddr = "1.0"
 ctrlc = "3.4"
 
 # HTTP client for downloading netboot images
-reqwest = { version = "0.12", features = ["blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 # SHA256 for verifying downloads
 sha2 = "0.10"
