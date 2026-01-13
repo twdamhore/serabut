@@ -50,60 +50,58 @@ The proxyDHCP approach means your existing DHCP server (router) handles IP assig
 cargo build --release
 ```
 
-## Running
-
-### Full PXE Boot Server
+## Quick Start
 
 ```bash
-# Serve Ubuntu 24.04 (default)
+# Build
+cargo build --release
+
+# Start PXE server for Ubuntu 24.04 on eth0
 sudo ./target/release/serabut -i eth0
 
-# Serve a different OS
-sudo ./target/release/serabut -i eth0 --os debian-12
+# That's it! Boot any machine on your network via PXE.
+```
+
+## Examples
+
+### Example 1: Basic Ubuntu 24.04 Install
+
+The simplest case - serve Ubuntu 24.04 installer to PXE clients:
+
+```bash
+sudo ./target/release/serabut -i eth0
+```
+
+On first run, this will:
+1. Download Ubuntu 24.04 netboot image (~400MB)
+2. Verify SHA256 checksum
+3. Extract to `/var/lib/serabut/tftp/`
+4. Start TFTP and proxyDHCP servers
+
+Then PXE boot any machine and select "Ubuntu Server Install" from the menu.
+
+### Example 2: Rocky Linux 9 Install
+
+```bash
 sudo ./target/release/serabut -i eth0 --os rocky-9
-
-# Use custom data directory
-sudo ./target/release/serabut -i eth0 --data-dir /opt/pxe
-
-# List available operating systems
-./target/release/serabut --list-os
 ```
 
-### Monitor Only Mode
+### Example 3: Debian 12 Install
 
 ```bash
-# Just monitor PXE traffic without serving files
-sudo ./target/release/serabut --monitor-only
+sudo ./target/release/serabut -i eth0 --os debian-12
 ```
 
-### Skip Download
+### Example 4: AlmaLinux 10 Install
 
 ```bash
-# Use existing netboot files (skip download check)
-sudo ./target/release/serabut -i eth0 --skip-download
+sudo ./target/release/serabut -i eth0 --os alma-10
 ```
 
-### Ubuntu Autoinstall
+### Example 5: Automated Ubuntu Install (No User Input)
 
-Enable automated Ubuntu installations with cloud-init:
+Create a `user-data.yaml` file for fully automated installation:
 
-```bash
-# Enable autoinstall with default user-data
-sudo ./target/release/serabut -i eth0 --autoinstall
-
-# Use custom user-data file
-sudo ./target/release/serabut -i eth0 --autoinstall --user-data /path/to/user-data.yaml
-
-# Custom HTTP port for cloud-init server
-sudo ./target/release/serabut -i eth0 --autoinstall --http-port 8888
-```
-
-When `--autoinstall` is enabled:
-1. An HTTP server starts to serve cloud-init data (user-data, meta-data)
-2. GRUB and syslinux configs are generated with autoinstall kernel parameters
-3. Ubuntu installer will automatically fetch configuration from the HTTP server
-
-Example `user-data.yaml`:
 ```yaml
 #cloud-config
 autoinstall:
@@ -113,14 +111,179 @@ autoinstall:
     layout: us
   identity:
     hostname: ubuntu-server
-    username: ubuntu
-    password: "$6$rounds=4096$..."  # mkpasswd -m sha-512
+    username: admin
+    # Password: "ubuntu" - generate with: mkpasswd -m sha-512
+    password: "$6$xyz$LnMaTH0tLrKR9K0OrLDjCk2E3k8EvRWuGd.mGVSBKnOLKQ8dF7jR7t/Kp7N8E3X7W5lE0Qr6VJ2Rt9w2QJ8A0"
   ssh:
     install-server: true
     allow-pw: true
+    authorized-keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-key-here
   storage:
     layout:
       name: lvm
+  late-commands:
+    - echo 'admin ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/admin
+```
+
+Run with autoinstall:
+
+```bash
+sudo ./target/release/serabut -i eth0 --autoinstall --user-data user-data.yaml
+```
+
+The machine will install Ubuntu completely unattended and reboot when done.
+
+### Example 6: Minimal Autoinstall (Prompt for Disk Only)
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  interactive-sections:
+    - storage
+  identity:
+    hostname: ubuntu-server
+    username: ubuntu
+    password: "$6$xyz$hash..."
+  ssh:
+    install-server: true
+```
+
+### Example 7: Monitor PXE Traffic Only
+
+Watch PXE boot activity without serving any files:
+
+```bash
+sudo ./target/release/serabut -i eth0 --monitor-only
+```
+
+Output:
+```
+[PXE DISCOVER] MAC: E8:FF:1E:D5:97:54 | XID: 0xd5c9b850 | Arch: EFI x64
+[PXE OFFER]    MAC: E8:FF:1E:D5:97:54 | IP: 192.168.4.167 | Server: 192.168.4.1 | XID: 0xd5c9b850
+```
+
+### Example 8: Use Existing Files (Offline Mode)
+
+If you've already downloaded the netboot image:
+
+```bash
+sudo ./target/release/serabut -i eth0 --skip-download
+```
+
+### Example 9: Custom Data Directory
+
+Store netboot files in a custom location:
+
+```bash
+sudo ./target/release/serabut -i eth0 --data-dir /srv/pxe --os ubuntu-24.04
+```
+
+### Example 10: Verbose Debugging
+
+```bash
+sudo ./target/release/serabut -i eth0 -v
+```
+
+### Example 11: Different HTTP Port for Autoinstall
+
+If port 8080 is in use:
+
+```bash
+sudo ./target/release/serabut -i eth0 --autoinstall --http-port 3000
+```
+
+## User-Data Examples
+
+### Development Server
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: dev-server
+    username: developer
+    password: "$6$xyz$hash..."
+  ssh:
+    install-server: true
+    allow-pw: true
+  packages:
+    - build-essential
+    - git
+    - docker.io
+    - vim
+  storage:
+    layout:
+      name: direct
+  late-commands:
+    - curtin in-target -- systemctl enable docker
+    - curtin in-target -- usermod -aG docker developer
+```
+
+### Minimal Server (Wipe Disk, SSH Only)
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: minimal
+    username: sysadmin
+    password: "$6$xyz$hash..."
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - ssh-ed25519 AAAAC3... your-public-key
+  storage:
+    layout:
+      name: lvm
+```
+
+### Static IP Configuration
+
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  network:
+    network:
+      version: 2
+      ethernets:
+        eth0:
+          addresses:
+            - 192.168.1.100/24
+          gateway4: 192.168.1.1
+          nameservers:
+            addresses:
+              - 8.8.8.8
+              - 8.8.4.4
+  identity:
+    hostname: static-server
+    username: admin
+    password: "$6$xyz$hash..."
+  ssh:
+    install-server: true
+```
+
+## Generating Password Hashes
+
+For the `password` field in user-data, generate a SHA-512 hash:
+
+```bash
+# Using mkpasswd (from whois package)
+mkpasswd -m sha-512 "your-password"
+
+# Using Python
+python3 -c "import crypt; print(crypt.crypt('your-password', crypt.mksalt(crypt.METHOD_SHA512)))"
+
+# Using openssl
+openssl passwd -6 "your-password"
 ```
 
 ## Command Line Options
