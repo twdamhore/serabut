@@ -405,4 +405,52 @@ mod tests {
         let manager = NetbootManager::new("/tmp/test", config);
         assert_eq!(manager.config().id, "ubuntu-24.04");
     }
+
+    #[test]
+    fn test_new_with_different_os() {
+        let config = NetbootConfigs::rocky_10();
+        let manager = NetbootManager::new("/tmp/test-rocky", config);
+        assert_eq!(manager.config().id, "rocky-10");
+        assert_eq!(manager.config().name, "Rocky Linux 10");
+    }
+
+    #[test]
+    fn test_new_with_alma_10() {
+        let config = NetbootConfigs::alma_10();
+        let manager = NetbootManager::new("/tmp/test-alma", config);
+        assert_eq!(manager.config().id, "alma-10");
+        assert_eq!(manager.config().name, "AlmaLinux 10");
+    }
+
+    #[test]
+    fn test_new_with_debian() {
+        let config = NetbootConfigs::debian_12();
+        let manager = NetbootManager::new("/tmp/test-debian", config);
+        assert_eq!(manager.config().id, "debian-12");
+        assert!(manager.config().sha256sums_url().is_some());
+    }
+
+    #[test]
+    fn test_data_dir_path() {
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/custom/path/to/data", config);
+        assert_eq!(manager.data_dir, PathBuf::from("/custom/path/to/data"));
+        assert_eq!(manager.tftp_root, PathBuf::from("/custom/path/to/data/tftp"));
+    }
+
+    #[test]
+    fn test_config_boot_files() {
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp/test", config);
+        assert_eq!(manager.config().boot_file_bios, "pxelinux.0");
+        assert_eq!(manager.config().boot_file_efi, "grubnetx64.efi.signed");
+    }
+
+    #[test]
+    fn test_config_boot_files_rocky() {
+        let config = NetbootConfigs::rocky_10();
+        let manager = NetbootManager::new("/tmp/test", config);
+        assert_eq!(manager.config().boot_file_bios, "pxelinux.0");
+        assert_eq!(manager.config().boot_file_efi, "grubx64.efi");
+    }
 }

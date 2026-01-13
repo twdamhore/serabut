@@ -136,7 +136,7 @@ impl EventReporter for ConsoleReporter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{PxeClientArch, PxeInfo};
+    use crate::domain::PxeInfo;
     use macaddr::MacAddr6;
     use std::net::Ipv4Addr;
 

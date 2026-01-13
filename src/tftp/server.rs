@@ -25,10 +25,10 @@ const OPCODE_ERROR: u16 = 5; // Error
 const OPCODE_OACK: u16 = 6;  // Option acknowledgment (RFC 2347)
 
 /// TFTP error codes
-const ERROR_NOT_DEFINED: u16 = 0;
+const _ERROR_NOT_DEFINED: u16 = 0;
 const ERROR_FILE_NOT_FOUND: u16 = 1;
 const ERROR_ACCESS_VIOLATION: u16 = 2;
-const ERROR_ILLEGAL_OPERATION: u16 = 4;
+const _ERROR_ILLEGAL_OPERATION: u16 = 4;
 
 /// Default block size
 const DEFAULT_BLOCK_SIZE: usize = 512;
@@ -365,5 +365,55 @@ mod tests {
         let server = TftpServer::new("/tmp/tftp", addr);
         let flag = server.running_flag();
         assert!(!flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_running_flag_can_be_set() {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 69));
+        let server = TftpServer::new("/tmp/tftp", addr);
+        let flag = server.running_flag();
+        flag.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_new_with_different_port() {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 6969));
+        let server = TftpServer::new("/var/lib/tftp", addr);
+        assert_eq!(server.bind_addr, addr);
+    }
+
+    #[test]
+    fn test_new_with_specific_interface() {
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(192, 168, 1, 100), 69));
+        let server = TftpServer::new("/srv/tftp", addr);
+        assert_eq!(server.bind_addr, addr);
+        assert_eq!(server.root, PathBuf::from("/srv/tftp"));
+    }
+
+    #[test]
+    fn test_default_block_size_constant() {
+        assert_eq!(DEFAULT_BLOCK_SIZE, 512);
+    }
+
+    #[test]
+    fn test_max_block_size_constant() {
+        assert_eq!(MAX_BLOCK_SIZE, 65464);
+    }
+
+    #[test]
+    fn test_opcode_constants() {
+        assert_eq!(OPCODE_RRQ, 1);
+        assert_eq!(OPCODE_WRQ, 2);
+        assert_eq!(OPCODE_DATA, 3);
+        assert_eq!(OPCODE_ACK, 4);
+        assert_eq!(OPCODE_ERROR, 5);
+        assert_eq!(OPCODE_OACK, 6);
+    }
+
+    #[test]
+    fn test_error_code_constants() {
+        assert_eq!(ERROR_FILE_NOT_FOUND, 1);
+        assert_eq!(ERROR_ACCESS_VIOLATION, 2);
     }
 }

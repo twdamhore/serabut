@@ -26,9 +26,9 @@ const PROXY_DHCP_PORT: u16 = 4011;
 const OPTION_DHCP_MESSAGE_TYPE: u8 = 53;
 const OPTION_SERVER_IDENTIFIER: u8 = 54;
 const OPTION_VENDOR_CLASS_ID: u8 = 60;
-const OPTION_CLIENT_ARCH: u8 = 93;
-const OPTION_CLIENT_NDI: u8 = 94;
-const OPTION_CLIENT_UUID: u8 = 97;
+const _OPTION_CLIENT_ARCH: u8 = 93;
+const _OPTION_CLIENT_NDI: u8 = 94;
+const _OPTION_CLIENT_UUID: u8 = 97;
 const OPTION_PXE_MENU: u8 = 43;  // Vendor-specific (encapsulated)
 const OPTION_END: u8 = 255;
 
@@ -425,6 +425,45 @@ mod tests {
     }
 
     #[test]
+    fn test_get_boot_file_efi_ia32() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        // EFI IA32 architecture (00006)
+        assert_eq!(
+            server.get_boot_file("PXEClient:Arch:00006:UNDI:003016"),
+            "grubnetx64.efi.signed"
+        );
+    }
+
+    #[test]
+    fn test_get_boot_file_efi_by_keyword() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        // EFI mentioned in vendor class
+        assert_eq!(
+            server.get_boot_file("PXEClient:EFI"),
+            "grubnetx64.efi.signed"
+        );
+    }
+
+    #[test]
+    fn test_get_boot_file_fallback_bios() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        // Unknown format falls back to BIOS
+        assert_eq!(server.get_boot_file("PXEClient"), "pxelinux.0");
+    }
+
+    #[test]
     fn test_running_flag() {
         let server = ProxyDhcpServer::new(
             Ipv4Addr::new(192, 168, 1, 100),
@@ -436,8 +475,113 @@ mod tests {
     }
 
     #[test]
+    fn test_running_flag_can_be_set() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        let flag = server.running_flag();
+        flag.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn test_format_mac() {
         let mac = MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
         assert_eq!(format_mac(mac), "AA:BB:CC:DD:EE:FF");
+    }
+
+    #[test]
+    fn test_format_mac_zeros() {
+        let mac = MacAddr6::new(0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
+        assert_eq!(format_mac(mac), "00:00:00:00:00:00");
+    }
+
+    #[test]
+    fn test_extract_mac() {
+        // Minimum valid DHCP packet with MAC at offset 28-33
+        let mut packet = vec![0u8; 240];
+        packet[28] = 0x11;
+        packet[29] = 0x22;
+        packet[30] = 0x33;
+        packet[31] = 0x44;
+        packet[32] = 0x55;
+        packet[33] = 0x66;
+
+        let mac = extract_mac(&packet);
+        assert_eq!(mac, MacAddr6::new(0x11, 0x22, 0x33, 0x44, 0x55, 0x66));
+    }
+
+    #[test]
+    fn test_extract_mac_short_packet() {
+        let packet = vec![0u8; 10];  // Too short
+        let mac = extract_mac(&packet);
+        assert_eq!(mac, MacAddr6::nil());
+    }
+
+    #[test]
+    fn test_build_response_short_packet() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        let short_request = vec![0u8; 100];  // Too short (need 240)
+        let response = server.build_response(&short_request, DhcpMessageType::Offer, "PXEClient");
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_build_response_valid() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        // Create a valid DHCP request packet
+        let mut request = vec![0u8; 300];
+        request[0] = 1;  // BOOTREQUEST
+        request[1] = 1;  // Hardware type: Ethernet
+        request[2] = 6;  // Hardware address length
+        // Transaction ID
+        request[4] = 0x12;
+        request[5] = 0x34;
+        request[6] = 0x56;
+        request[7] = 0x78;
+        // MAC address
+        request[28] = 0xAA;
+        request[29] = 0xBB;
+        request[30] = 0xCC;
+        request[31] = 0xDD;
+        request[32] = 0xEE;
+        request[33] = 0xFF;
+        // Magic cookie at offset 236
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient:Arch:00000");
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        // Check BOOTREPLY
+        assert_eq!(resp[0], 2);
+        // Check transaction ID copied
+        assert_eq!(&resp[4..8], &[0x12, 0x34, 0x56, 0x78]);
+        // Check MAC copied
+        assert_eq!(&resp[28..34], &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
+        // Check server IP (siaddr)
+        assert_eq!(&resp[20..24], &[192, 168, 1, 100]);
+    }
+
+    #[test]
+    fn test_new_with_different_boot_files() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(10, 0, 0, 1),
+            "lpxelinux.0",
+            "grubx64.efi",
+        );
+        assert_eq!(server.boot_file_bios, "lpxelinux.0");
+        assert_eq!(server.boot_file_efi, "grubx64.efi");
     }
 }

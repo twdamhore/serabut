@@ -20,7 +20,9 @@ A PXE boot server that automatically downloads netboot images and serves them to
 | `ubuntu-22.04` | Ubuntu 22.04 LTS (Jammy Jellyfish) |
 | `debian-12` | Debian 12 (Bookworm) |
 | `rocky-9` | Rocky Linux 9 |
+| `rocky-10` | Rocky Linux 10 |
 | `alma-9` | AlmaLinux 9 |
+| `alma-10` | AlmaLinux 10 |
 
 Use `--list-os` to see all available options.
 
