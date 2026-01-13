@@ -1,5 +1,8 @@
 //! pnet-based packet capture implementation.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use pnet::datalink::{self, Channel, Config, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
@@ -18,6 +21,7 @@ const DHCP_CLIENT_PORT: u16 = 68;
 /// Packet capture using the pnet library.
 pub struct PnetCapture {
     interface: NetworkInterface,
+    running: Arc<AtomicBool>,
 }
 
 impl PnetCapture {
@@ -28,7 +32,10 @@ impl PnetCapture {
             .find(|iface| iface.name == interface_name)
             .ok_or_else(|| CaptureError::InterfaceNotFound(interface_name.to_string()))?;
 
-        Ok(Self { interface })
+        Ok(Self {
+            interface,
+            running: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     /// Create a capture on the first suitable interface.
@@ -42,7 +49,10 @@ impl PnetCapture {
                 CaptureError::InterfaceNotFound("no suitable interface found".to_string())
             })?;
 
-        Ok(Self { interface })
+        Ok(Self {
+            interface,
+            running: Arc::new(AtomicBool::new(true)),
+        })
     }
 
     /// List all available network interfaces.
@@ -92,17 +102,25 @@ impl PacketCapture for PnetCapture {
             }
         };
 
-        Ok(Box::new(DhcpPacketIterator { rx }))
+        Ok(Box::new(DhcpPacketIterator {
+            rx,
+            running: self.running.clone(),
+        }))
     }
 
     fn interface_name(&self) -> &str {
         &self.interface.name
+    }
+
+    fn set_running(&mut self, running: Arc<AtomicBool>) {
+        self.running = running;
     }
 }
 
 /// Iterator that yields DHCP packets from the network.
 struct DhcpPacketIterator {
     rx: Box<dyn datalink::DataLinkReceiver>,
+    running: Arc<AtomicBool>,
 }
 
 impl Iterator for DhcpPacketIterator {
@@ -110,6 +128,11 @@ impl Iterator for DhcpPacketIterator {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            // Check if we should stop
+            if !self.running.load(Ordering::SeqCst) {
+                return None;
+            }
+
             match self.rx.next() {
                 Ok(packet) => {
                     if let Some(dhcp_packet) = extract_dhcp_packet(packet) {

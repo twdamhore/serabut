@@ -11,6 +11,7 @@ A PXE boot server that automatically downloads netboot images and serves them to
 - **ProxyDHCP**: Works with existing DHCP servers - no need to replace your router
 - **PXE monitoring**: Real-time logging of all PXE boot activity
 - **Multi-architecture**: Supports both BIOS and UEFI clients
+- **Ubuntu autoinstall**: Automated Ubuntu installations with cloud-init
 
 ## Supported Operating Systems
 
@@ -82,6 +83,46 @@ sudo ./target/release/serabut --monitor-only
 sudo ./target/release/serabut -i eth0 --skip-download
 ```
 
+### Ubuntu Autoinstall
+
+Enable automated Ubuntu installations with cloud-init:
+
+```bash
+# Enable autoinstall with default user-data
+sudo ./target/release/serabut -i eth0 --autoinstall
+
+# Use custom user-data file
+sudo ./target/release/serabut -i eth0 --autoinstall --user-data /path/to/user-data.yaml
+
+# Custom HTTP port for cloud-init server
+sudo ./target/release/serabut -i eth0 --autoinstall --http-port 8888
+```
+
+When `--autoinstall` is enabled:
+1. An HTTP server starts to serve cloud-init data (user-data, meta-data)
+2. GRUB and syslinux configs are generated with autoinstall kernel parameters
+3. Ubuntu installer will automatically fetch configuration from the HTTP server
+
+Example `user-data.yaml`:
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: ubuntu-server
+    username: ubuntu
+    password: "$6$rounds=4096$..."  # mkpasswd -m sha-512
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: lvm
+```
+
 ## Command Line Options
 
 | Option | Description |
@@ -92,6 +133,9 @@ sudo ./target/release/serabut -i eth0 --skip-download
 | `--tftp-port <PORT>` | TFTP server port (default: 69) |
 | `--skip-download` | Skip netboot download, use existing files |
 | `--monitor-only` | Monitor only mode, no TFTP/proxyDHCP servers |
+| `--autoinstall` | Enable Ubuntu autoinstall with cloud-init HTTP server |
+| `--user-data <PATH>` | Path to user-data file for autoinstall |
+| `--http-port <PORT>` | Cloud-init HTTP server port (default: 8080) |
 | `-v, --verbose` | Enable verbose output |
 | `--no-color` | Disable colored output |
 | `--list-interfaces` | List available network interfaces and exit |
@@ -139,6 +183,7 @@ Ensure these ports are open:
 | 67 | UDP | DHCP/ProxyDHCP |
 | 69 | UDP | TFTP |
 | 4011 | UDP | ProxyDHCP (alternate) |
+| 8080 | TCP | Cloud-init HTTP (for autoinstall) |
 
 ## Testing
 

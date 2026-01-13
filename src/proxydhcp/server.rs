@@ -584,4 +584,242 @@ mod tests {
         assert_eq!(server.boot_file_bios, "lpxelinux.0");
         assert_eq!(server.boot_file_efi, "grubx64.efi");
     }
+
+    #[test]
+    fn test_build_response_efi_boot_file() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[1] = 1;
+        request[2] = 6;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient:Arch:00007");
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        // Check boot filename is copied (offset 108-236)
+        let boot_file_bytes = &resp[108..236];
+        let boot_file_end = boot_file_bytes.iter().position(|&b| b == 0).unwrap_or(boot_file_bytes.len());
+        let boot_file = String::from_utf8_lossy(&boot_file_bytes[..boot_file_end]);
+        assert_eq!(boot_file, "grubnetx64.efi.signed");
+    }
+
+    #[test]
+    fn test_build_response_bios_boot_file() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[1] = 1;
+        request[2] = 6;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient:Arch:00000");
+        assert!(response.is_some());
+
+        let resp = response.unwrap();
+        let boot_file_bytes = &resp[108..236];
+        let boot_file_end = boot_file_bytes.iter().position(|&b| b == 0).unwrap_or(boot_file_bytes.len());
+        let boot_file = String::from_utf8_lossy(&boot_file_bytes[..boot_file_end]);
+        assert_eq!(boot_file, "pxelinux.0");
+    }
+
+    #[test]
+    fn test_build_response_contains_magic_cookie() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        assert_eq!(&response[236..240], &DHCP_MAGIC_COOKIE);
+    }
+
+    #[test]
+    fn test_build_response_contains_message_type() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        // Test OFFER
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        // Option 53 (message type) should be at offset 240: [53, 1, type]
+        assert_eq!(response[240], OPTION_DHCP_MESSAGE_TYPE);
+        assert_eq!(response[241], 1); // length
+        assert_eq!(response[242], DhcpMessageType::Offer as u8);
+
+        // Test ACK
+        let response = server.build_response(&request, DhcpMessageType::Ack, "PXEClient").unwrap();
+        assert_eq!(response[242], DhcpMessageType::Ack as u8);
+    }
+
+    #[test]
+    fn test_build_response_contains_server_identifier() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        // Option 54 (server id) follows option 53
+        assert_eq!(response[243], OPTION_SERVER_IDENTIFIER);
+        assert_eq!(response[244], 4); // length
+        assert_eq!(&response[245..249], &[192, 168, 1, 100]);
+    }
+
+    #[test]
+    fn test_build_response_contains_vendor_class() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        // Option 60 (vendor class) follows option 54
+        assert_eq!(response[249], OPTION_VENDOR_CLASS_ID);
+        // "PXEClient" is 9 bytes
+        assert_eq!(response[250], 9);
+    }
+
+    #[test]
+    fn test_build_response_minimum_size() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        // Response should be at least 300 bytes (padded minimum DHCP size)
+        assert!(response.len() >= 300);
+    }
+
+    #[test]
+    fn test_build_response_copies_giaddr() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+
+        let mut request = vec![0u8; 300];
+        request[0] = 1;
+        // Set giaddr (gateway) at offset 24
+        request[24] = 10;
+        request[25] = 0;
+        request[26] = 0;
+        request[27] = 1;
+        request[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+
+        let response = server.build_response(&request, DhcpMessageType::Offer, "PXEClient").unwrap();
+        // giaddr should be copied
+        assert_eq!(&response[24..28], &[10, 0, 0, 1]);
+    }
+
+    #[test]
+    fn test_get_boot_file_efi_arm64() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        // ARM64 EFI architecture (00011)
+        assert_eq!(
+            server.get_boot_file("PXEClient:Arch:00011:UNDI:003016"),
+            "grubnetx64.efi.signed"
+        );
+    }
+
+    #[test]
+    fn test_get_boot_file_00007_in_string() {
+        let server = ProxyDhcpServer::new(
+            Ipv4Addr::new(192, 168, 1, 100),
+            "pxelinux.0",
+            "grubnetx64.efi.signed",
+        );
+        // 00007 mentioned anywhere should trigger EFI
+        assert_eq!(
+            server.get_boot_file("PXEClient-00007"),
+            "grubnetx64.efi.signed"
+        );
+    }
+
+    #[test]
+    fn test_extract_mac_exact_minimum_length() {
+        // Exactly 34 bytes (minimum needed for MAC at 28-33)
+        let mut packet = vec![0u8; 34];
+        packet[28] = 0xDE;
+        packet[29] = 0xAD;
+        packet[30] = 0xBE;
+        packet[31] = 0xEF;
+        packet[32] = 0xCA;
+        packet[33] = 0xFE;
+
+        let mac = extract_mac(&packet);
+        assert_eq!(mac, MacAddr6::new(0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE));
+    }
+
+    #[test]
+    fn test_extract_mac_just_under_minimum() {
+        // 33 bytes (one byte short)
+        let packet = vec![0u8; 33];
+        let mac = extract_mac(&packet);
+        assert_eq!(mac, MacAddr6::nil());
+    }
+
+    #[test]
+    fn test_dhcp_constants() {
+        assert_eq!(DHCP_SERVER_PORT, 67);
+        assert_eq!(DHCP_CLIENT_PORT, 68);
+        assert_eq!(PROXY_DHCP_PORT, 4011);
+    }
+
+    #[test]
+    fn test_option_constants() {
+        assert_eq!(OPTION_DHCP_MESSAGE_TYPE, 53);
+        assert_eq!(OPTION_SERVER_IDENTIFIER, 54);
+        assert_eq!(OPTION_VENDOR_CLASS_ID, 60);
+        assert_eq!(OPTION_PXE_MENU, 43);
+        assert_eq!(OPTION_END, 255);
+    }
+
+    #[test]
+    fn test_magic_cookie() {
+        assert_eq!(DHCP_MAGIC_COOKIE, [99, 130, 83, 99]);
+    }
 }

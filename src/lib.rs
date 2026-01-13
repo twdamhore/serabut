@@ -36,6 +36,7 @@ pub mod capture;
 pub mod detector;
 pub mod domain;
 pub mod error;
+pub mod http;
 pub mod netboot;
 pub mod parser;
 pub mod proxydhcp;
