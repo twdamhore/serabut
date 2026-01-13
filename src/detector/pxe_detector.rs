@@ -1,14 +1,43 @@
 //! PXE boot detection logic.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use macaddr::MacAddr6;
+
 use crate::domain::{DhcpMessageType, DhcpPacket, PxeBootEvent, PxeInfo};
+
+/// Key for tracking PXE transactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TransactionKey {
+    xid: u32,
+    mac: MacAddr6,
+}
+
+/// Stored information about a tracked PXE transaction.
+#[derive(Debug, Clone)]
+struct TrackedTransaction {
+    pxe_info: PxeInfo,
+    timestamp: Instant,
+}
+
+/// How long to keep tracked transactions before expiring them.
+const TRANSACTION_TTL: Duration = Duration::from_secs(30);
 
 /// Detects PXE boot activity from DHCP packets.
 ///
 /// Implements Single Responsibility Principle by focusing solely
 /// on PXE detection logic, separate from parsing or reporting.
+///
+/// Tracks PXE client requests (DISCOVER/REQUEST) so that corresponding
+/// server responses (OFFER/ACK) can be matched even when the server
+/// doesn't echo the PXE vendor class.
 pub struct PxeDetector {
     /// Whether to include non-PXE DHCP traffic
     include_non_pxe: bool,
+    /// Tracked PXE transactions (XID + MAC -> PxeInfo)
+    transactions: Mutex<HashMap<TransactionKey, TrackedTransaction>>,
 }
 
 impl PxeDetector {
@@ -16,6 +45,7 @@ impl PxeDetector {
     pub fn new() -> Self {
         Self {
             include_non_pxe: false,
+            transactions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -29,15 +59,31 @@ impl PxeDetector {
     ///
     /// Returns `Some(PxeBootEvent)` if the packet is PXE-related,
     /// `None` otherwise.
+    ///
+    /// For client requests (DISCOVER/REQUEST) with PXE vendor class,
+    /// the transaction is tracked so corresponding server responses
+    /// can be detected even without PXE vendor class.
     pub fn detect(&self, packet: &DhcpPacket) -> Option<PxeBootEvent> {
-        // Check if this is a PXE client by looking at vendor class ID
-        let pxe_info = self.extract_pxe_info(packet)?;
-
         let message_type = packet.message_type()?;
+
+        // Try to extract PXE info from the packet itself
+        let pxe_info_from_packet = self.extract_pxe_info(packet);
+
+        // Create transaction key for lookup/storage
+        let key = TransactionKey {
+            xid: packet.xid,
+            mac: packet.chaddr,
+        };
 
         // Create the appropriate event based on message type
         match message_type {
             DhcpMessageType::Discover | DhcpMessageType::Request => {
+                // For client requests, we need PXE info from the packet
+                let pxe_info = pxe_info_from_packet?;
+
+                // Track this PXE transaction
+                self.track_transaction(key, pxe_info.clone());
+
                 Some(PxeBootEvent::from_request(
                     packet.chaddr,
                     packet.xid,
@@ -46,6 +92,11 @@ impl PxeDetector {
                 ))
             }
             DhcpMessageType::Offer | DhcpMessageType::Ack => {
+                // For server responses, try packet PXE info first,
+                // then fall back to tracked transaction
+                let pxe_info = pxe_info_from_packet
+                    .or_else(|| self.lookup_transaction(&key))?;
+
                 // For server responses, include the assigned IP
                 let assigned_ip = if packet.yiaddr.is_unspecified() {
                     packet.ciaddr
@@ -63,6 +114,37 @@ impl PxeDetector {
                 ))
             }
             _ => None,
+        }
+    }
+
+    /// Track a PXE transaction for later correlation with server responses.
+    fn track_transaction(&self, key: TransactionKey, pxe_info: PxeInfo) {
+        let mut transactions = self.transactions.lock().unwrap();
+
+        // Clean up expired transactions while we have the lock
+        let now = Instant::now();
+        transactions.retain(|_, v| now.duration_since(v.timestamp) < TRANSACTION_TTL);
+
+        // Store the new transaction
+        transactions.insert(
+            key,
+            TrackedTransaction {
+                pxe_info,
+                timestamp: now,
+            },
+        );
+    }
+
+    /// Look up a tracked transaction by XID and MAC.
+    fn lookup_transaction(&self, key: &TransactionKey) -> Option<PxeInfo> {
+        let transactions = self.transactions.lock().unwrap();
+        let tracked = transactions.get(key)?;
+
+        // Check if the transaction is still valid
+        if Instant::now().duration_since(tracked.timestamp) < TRANSACTION_TTL {
+            Some(tracked.pxe_info.clone())
+        } else {
+            None
         }
     }
 
@@ -438,5 +520,240 @@ mod tests {
 
         // Should return None because message type is required
         assert!(detector.detect(&packet).is_none());
+    }
+
+    // Transaction tracking tests
+
+    #[test]
+    fn test_server_response_without_vendor_class_detected_via_tracking() {
+        let detector = PxeDetector::new();
+        let mac = MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+        let xid = 0x12345678;
+
+        // First, send a PXE DISCOVER (with vendor class)
+        let discover = create_test_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Discover,
+        );
+        let event = detector.detect(&discover);
+        assert!(event.is_some());
+        assert_eq!(event.unwrap().message_type, DhcpMessageType::Discover);
+
+        // Now send a server OFFER without vendor class (standard DHCP response)
+        let mut offer = create_reply_packet(
+            None, // No PXE vendor class in server response
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        offer.xid = xid;
+        offer.chaddr = mac;
+
+        // Should still detect the OFFER because we tracked the DISCOVER
+        let event = detector.detect(&offer);
+        assert!(event.is_some(), "Server OFFER should be detected via transaction tracking");
+
+        let event = event.unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Offer);
+        assert_eq!(event.assigned_ip, Some(Ipv4Addr::new(192, 168, 1, 100)));
+        assert_eq!(event.server_ip, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        // PXE info should come from the tracked transaction
+        assert!(event.pxe_info.vendor_class.starts_with("PXEClient"));
+    }
+
+    #[test]
+    fn test_server_ack_without_vendor_class_detected_via_tracking() {
+        let detector = PxeDetector::new();
+
+        // First, send a PXE REQUEST (with vendor class)
+        let request = create_test_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Request,
+        );
+        detector.detect(&request);
+
+        // Now send a server ACK without vendor class
+        let ack = create_reply_packet(
+            None,
+            DhcpMessageType::Ack,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        let event = detector.detect(&ack);
+        assert!(event.is_some(), "Server ACK should be detected via transaction tracking");
+        assert_eq!(event.unwrap().message_type, DhcpMessageType::Ack);
+    }
+
+    #[test]
+    fn test_untracked_server_response_ignored() {
+        let detector = PxeDetector::new();
+
+        // Send a server OFFER without any prior PXE request
+        let offer = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        // Should NOT detect because there's no tracked PXE transaction
+        let event = detector.detect(&offer);
+        assert!(event.is_none(), "Untracked server response should be ignored");
+    }
+
+    #[test]
+    fn test_different_xid_not_matched() {
+        let detector = PxeDetector::new();
+
+        // Send a PXE DISCOVER with one XID
+        let mut discover = create_test_packet(
+            Some("PXEClient"),
+            DhcpMessageType::Discover,
+        );
+        discover.xid = 0x11111111;
+        detector.detect(&discover);
+
+        // Send a server OFFER with different XID
+        let mut offer = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        offer.xid = 0x22222222;
+
+        // Should NOT detect because XIDs don't match
+        let event = detector.detect(&offer);
+        assert!(event.is_none(), "Response with different XID should not be matched");
+    }
+
+    #[test]
+    fn test_different_mac_not_matched() {
+        let detector = PxeDetector::new();
+
+        // Send a PXE DISCOVER with one MAC
+        let mut discover = create_test_packet(
+            Some("PXEClient"),
+            DhcpMessageType::Discover,
+        );
+        discover.chaddr = MacAddr6::new(0x11, 0x22, 0x33, 0x44, 0x55, 0x66);
+        detector.detect(&discover);
+
+        // Send a server OFFER with same XID but different MAC
+        let mut offer = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        offer.chaddr = MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff);
+
+        // Should NOT detect because MACs don't match
+        let event = detector.detect(&offer);
+        assert!(event.is_none(), "Response with different MAC should not be matched");
+    }
+
+    #[test]
+    fn test_full_pxe_exchange_sequence() {
+        let detector = PxeDetector::new();
+        let mac = MacAddr6::new(0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe);
+        let xid = 0xaabbccdd;
+
+        // 1. Client sends DISCOVER
+        let mut discover = create_test_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Discover,
+        );
+        discover.xid = xid;
+        discover.chaddr = mac;
+        let event = detector.detect(&discover).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Discover);
+        assert!(event.pxe_info.architecture.is_some());
+
+        // 2. Server sends OFFER (no vendor class)
+        let mut offer = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(10, 0, 0, 50),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        offer.xid = xid;
+        offer.chaddr = mac;
+        let event = detector.detect(&offer).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Offer);
+        assert_eq!(event.assigned_ip, Some(Ipv4Addr::new(10, 0, 0, 50)));
+        // Architecture should be preserved from the tracked DISCOVER
+        assert!(event.pxe_info.architecture.is_some());
+
+        // 3. Client sends REQUEST
+        let mut request = create_test_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Request,
+        );
+        request.xid = xid;
+        request.chaddr = mac;
+        let event = detector.detect(&request).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Request);
+
+        // 4. Server sends ACK (no vendor class)
+        let mut ack = create_reply_packet(
+            None,
+            DhcpMessageType::Ack,
+            Ipv4Addr::new(10, 0, 0, 50),
+            Ipv4Addr::new(10, 0, 0, 1),
+        );
+        ack.xid = xid;
+        ack.chaddr = mac;
+        let event = detector.detect(&ack).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Ack);
+        assert_eq!(event.assigned_ip, Some(Ipv4Addr::new(10, 0, 0, 50)));
+    }
+
+    #[test]
+    fn test_multiple_concurrent_transactions() {
+        let detector = PxeDetector::new();
+
+        // Client 1 DISCOVER
+        let mut discover1 = create_test_packet(
+            Some("PXEClient:Arch:00007"),
+            DhcpMessageType::Discover,
+        );
+        discover1.xid = 0x11111111;
+        discover1.chaddr = MacAddr6::new(0x11, 0x11, 0x11, 0x11, 0x11, 0x11);
+        detector.detect(&discover1);
+
+        // Client 2 DISCOVER
+        let mut discover2 = create_test_packet(
+            Some("PXEClient:Arch:00000"),
+            DhcpMessageType::Discover,
+        );
+        discover2.xid = 0x22222222;
+        discover2.chaddr = MacAddr6::new(0x22, 0x22, 0x22, 0x22, 0x22, 0x22);
+        detector.detect(&discover2);
+
+        // Server responds to Client 2 first
+        let mut offer2 = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 102),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        offer2.xid = 0x22222222;
+        offer2.chaddr = MacAddr6::new(0x22, 0x22, 0x22, 0x22, 0x22, 0x22);
+        let event2 = detector.detect(&offer2).unwrap();
+        assert_eq!(event2.assigned_ip, Some(Ipv4Addr::new(192, 168, 1, 102)));
+
+        // Server responds to Client 1
+        let mut offer1 = create_reply_packet(
+            None,
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 101),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        offer1.xid = 0x11111111;
+        offer1.chaddr = MacAddr6::new(0x11, 0x11, 0x11, 0x11, 0x11, 0x11);
+        let event1 = detector.detect(&offer1).unwrap();
+        assert_eq!(event1.assigned_ip, Some(Ipv4Addr::new(192, 168, 1, 101)));
     }
 }
