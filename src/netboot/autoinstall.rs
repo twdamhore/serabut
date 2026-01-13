@@ -260,4 +260,200 @@ mod tests {
         assert!(content.contains("ds=nocloud-net"));
         assert!(content.contains("http://192.168.1.100:8080/"));
     }
+
+    #[test]
+    fn test_autoinstall_config_with_meta_data() {
+        let config = AutoinstallConfig::new("http://test/")
+            .with_meta_data("/path/to/meta-data");
+        assert_eq!(config.meta_data_path, Some(PathBuf::from("/path/to/meta-data")));
+    }
+
+    #[test]
+    fn test_autoinstall_config_builder_chain() {
+        let config = AutoinstallConfig::new("http://example.com/")
+            .with_user_data("/user-data")
+            .with_meta_data("/meta-data");
+        assert_eq!(config.datasource_url, "http://example.com/");
+        assert_eq!(config.user_data_path, Some(PathBuf::from("/user-data")));
+        assert_eq!(config.meta_data_path, Some(PathBuf::from("/meta-data")));
+    }
+
+    #[test]
+    fn test_kernel_params_different_urls() {
+        let config = AutoinstallConfig::new("http://10.0.0.1:3000/cloud-init/");
+        let params = config.kernel_params();
+        assert_eq!(params, "autoinstall ds=nocloud-net;s=http://10.0.0.1:3000/cloud-init/");
+    }
+
+    #[test]
+    fn test_grub_config_contains_timeout() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.grub_config_content();
+        assert!(content.contains("set timeout=5"));
+    }
+
+    #[test]
+    fn test_grub_config_contains_default() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.grub_config_content();
+        assert!(content.contains("set default=0"));
+    }
+
+    #[test]
+    fn test_grub_config_contains_safe_mode() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.grub_config_content();
+        assert!(content.contains("Safe Mode"));
+        assert!(content.contains("nomodeset"));
+    }
+
+    #[test]
+    fn test_grub_config_contains_ip_dhcp() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.grub_config_content();
+        assert!(content.contains("ip=dhcp"));
+    }
+
+    #[test]
+    fn test_syslinux_config_contains_timeout() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("TIMEOUT 50"));
+    }
+
+    #[test]
+    fn test_syslinux_config_contains_default() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("DEFAULT install"));
+    }
+
+    #[test]
+    fn test_syslinux_config_contains_prompt() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("PROMPT 1"));
+    }
+
+    #[test]
+    fn test_syslinux_config_contains_kernel() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("KERNEL casper/vmlinuz"));
+    }
+
+    #[test]
+    fn test_syslinux_config_contains_append() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("APPEND initrd=casper/initrd"));
+    }
+
+    #[test]
+    fn test_syslinux_config_safe_mode_label() {
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp");
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("LABEL install-safe"));
+        assert!(content.contains("MENU LABEL Ubuntu Server Install (Safe Mode)"));
+    }
+
+    #[test]
+    fn test_grub_config_autoinstall_menu_label() {
+        let config = AutoinstallConfig::new("http://test/");
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp")
+            .with_autoinstall(config);
+        let content = gen.grub_config_content();
+        assert!(content.contains("(Autoinstall)"));
+    }
+
+    #[test]
+    fn test_syslinux_config_autoinstall_menu_label() {
+        let config = AutoinstallConfig::new("http://test/");
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp")
+            .with_autoinstall(config);
+        let content = gen.syslinux_config_content();
+        assert!(content.contains("(Autoinstall)"));
+    }
+
+    #[test]
+    fn test_generate_grub_config_creates_file() {
+        let temp_dir = std::env::temp_dir().join("serabut_test_grub");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let gen = BootloaderConfigGenerator::new(&temp_dir);
+        let result = gen.generate_grub_config();
+        assert!(result.is_ok());
+
+        let grub_cfg = temp_dir.join("grub").join("grub.cfg");
+        assert!(grub_cfg.exists());
+
+        let content = std::fs::read_to_string(&grub_cfg).unwrap();
+        assert!(content.contains("menuentry"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_generate_syslinux_config_creates_file() {
+        let temp_dir = std::env::temp_dir().join("serabut_test_syslinux");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let gen = BootloaderConfigGenerator::new(&temp_dir);
+        let result = gen.generate_syslinux_config();
+        assert!(result.is_ok());
+
+        let default_cfg = temp_dir.join("pxelinux.cfg").join("default");
+        assert!(default_cfg.exists());
+
+        let content = std::fs::read_to_string(&default_cfg).unwrap();
+        assert!(content.contains("LABEL install"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_generate_creates_both_configs() {
+        let temp_dir = std::env::temp_dir().join("serabut_test_both");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let gen = BootloaderConfigGenerator::new(&temp_dir);
+        let result = gen.generate();
+        assert!(result.is_ok());
+
+        assert!(temp_dir.join("grub").join("grub.cfg").exists());
+        assert!(temp_dir.join("pxelinux.cfg").join("default").exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_generate_with_autoinstall() {
+        let temp_dir = std::env::temp_dir().join("serabut_test_autoinstall");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let config = AutoinstallConfig::new("http://192.168.1.100:8080/");
+        let gen = BootloaderConfigGenerator::new(&temp_dir)
+            .with_autoinstall(config);
+        let result = gen.generate();
+        assert!(result.is_ok());
+
+        let grub_content = std::fs::read_to_string(temp_dir.join("grub").join("grub.cfg")).unwrap();
+        assert!(grub_content.contains("ds=nocloud-net"));
+        assert!(grub_content.contains("http://192.168.1.100:8080/"));
+
+        let syslinux_content = std::fs::read_to_string(temp_dir.join("pxelinux.cfg").join("default")).unwrap();
+        assert!(syslinux_content.contains("ds=nocloud-net"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_bootloader_generator_tftp_root_path() {
+        let gen = BootloaderConfigGenerator::new("/custom/tftp/root");
+        assert_eq!(gen.tftp_root, PathBuf::from("/custom/tftp/root"));
+    }
 }

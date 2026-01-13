@@ -369,4 +369,129 @@ mod tests {
         assert!(response.contains("404"));
         assert!(response.contains("Not Found: /unknown"));
     }
+
+    #[test]
+    fn test_serve_user_data_with_custom() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr)
+            .with_user_data("custom-user-data".to_string());
+
+        let response = server.serve_user_data();
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("custom-user-data"));
+    }
+
+    #[test]
+    fn test_serve_user_data_default() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/nonexistent/path", addr);
+
+        let response = server.serve_user_data();
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("#cloud-config"));
+    }
+
+    #[test]
+    fn test_serve_meta_data_with_custom() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr)
+            .with_meta_data("instance-id: custom-id".to_string());
+
+        let response = server.serve_meta_data();
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("instance-id: custom-id"));
+    }
+
+    #[test]
+    fn test_serve_meta_data_default() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/nonexistent/path", addr);
+
+        let response = server.serve_meta_data();
+        assert!(response.contains("HTTP/1.1 200 OK"));
+        assert!(response.contains("instance-id:"));
+    }
+
+    #[test]
+    fn test_serve_vendor_data() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/nonexistent/path", addr);
+
+        let response = server.serve_vendor_data();
+        assert!(response.contains("HTTP/1.1 200 OK"));
+    }
+
+    #[test]
+    fn test_http_response_404() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let response = server.http_response(404, "text/plain", "not found");
+        assert!(response.contains("HTTP/1.1 404 Not Found"));
+        assert!(response.contains("not found"));
+    }
+
+    #[test]
+    fn test_http_response_500() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let response = server.http_response(500, "text/plain", "error");
+        assert!(response.contains("HTTP/1.1 500 Internal Server Error"));
+    }
+
+    #[test]
+    fn test_http_response_unknown_status() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let response = server.http_response(418, "text/plain", "teapot");
+        assert!(response.contains("HTTP/1.1 418 Unknown"));
+    }
+
+    #[test]
+    fn test_parse_request_post() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let (method, path) = server.parse_request("POST /api HTTP/1.1\r\n");
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api");
+    }
+
+    #[test]
+    fn test_parse_request_with_query() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let (method, path) = server.parse_request("GET /user-data?mac=aa:bb HTTP/1.1\r\n");
+        assert_eq!(method, "GET");
+        assert_eq!(path, "/user-data?mac=aa:bb");
+    }
+
+    #[test]
+    fn test_url_different_port() {
+        let addr = SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 3000));
+        let server = CloudInitServer::new("/tmp", addr);
+        assert_eq!(server.url(), "http://10.0.0.1:3000/");
+    }
+
+    #[test]
+    fn test_running_flag_can_be_set() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+        let flag = server.running_flag();
+        flag.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_serve_index_content_type() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+
+        let response = server.serve_index();
+        assert!(response.contains("Content-Type: text/plain"));
+        assert!(response.contains("vendor-data"));
+    }
 }
