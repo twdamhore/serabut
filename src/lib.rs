@@ -1,6 +1,7 @@
-//! Serabut - DHCP PXE Boot Listener
+//! Serabut - DHCP PXE Boot Server
 //!
-//! A tool for monitoring network traffic and detecting PXE boot requests.
+//! A PXE boot server that monitors network traffic, downloads Ubuntu netboot
+//! images, and serves them to PXE clients via proxyDHCP and TFTP.
 //!
 //! # Architecture
 //!
@@ -12,6 +13,9 @@
 //!   - `capture`: Network packet capture
 //!   - `detector`: PXE detection logic
 //!   - `reporter`: Event output
+//!   - `netboot`: Netboot image management
+//!   - `tftp`: TFTP server for boot files
+//!   - `proxydhcp`: ProxyDHCP server for PXE boot info
 //!
 //! - **O**pen/Closed: Extensible without modification
 //!   - Add new reporters by implementing `EventReporter`
@@ -32,8 +36,11 @@ pub mod capture;
 pub mod detector;
 pub mod domain;
 pub mod error;
+pub mod netboot;
 pub mod parser;
+pub mod proxydhcp;
 pub mod reporter;
+pub mod tftp;
 
 use capture::{PacketCapture, RawPacket};
 use detector::PxeDetector;
