@@ -163,3 +163,229 @@ impl DhcpPacket {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_packet(op: u8, options: Vec<DhcpOption>) -> DhcpPacket {
+        DhcpPacket {
+            op,
+            htype: 1,
+            hlen: 6,
+            xid: 0x12345678,
+            secs: 0,
+            flags: 0,
+            ciaddr: Ipv4Addr::UNSPECIFIED,
+            yiaddr: Ipv4Addr::UNSPECIFIED,
+            siaddr: Ipv4Addr::UNSPECIFIED,
+            giaddr: Ipv4Addr::UNSPECIFIED,
+            chaddr: MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff),
+            sname: None,
+            file: None,
+            options,
+        }
+    }
+
+    mod dhcp_message_type_tests {
+        use super::*;
+
+        #[test]
+        fn test_from_u8_valid_values() {
+            assert_eq!(DhcpMessageType::from_u8(1), Some(DhcpMessageType::Discover));
+            assert_eq!(DhcpMessageType::from_u8(2), Some(DhcpMessageType::Offer));
+            assert_eq!(DhcpMessageType::from_u8(3), Some(DhcpMessageType::Request));
+            assert_eq!(DhcpMessageType::from_u8(4), Some(DhcpMessageType::Decline));
+            assert_eq!(DhcpMessageType::from_u8(5), Some(DhcpMessageType::Ack));
+            assert_eq!(DhcpMessageType::from_u8(6), Some(DhcpMessageType::Nak));
+            assert_eq!(DhcpMessageType::from_u8(7), Some(DhcpMessageType::Release));
+            assert_eq!(DhcpMessageType::from_u8(8), Some(DhcpMessageType::Inform));
+        }
+
+        #[test]
+        fn test_from_u8_invalid_values() {
+            assert_eq!(DhcpMessageType::from_u8(0), None);
+            assert_eq!(DhcpMessageType::from_u8(9), None);
+            assert_eq!(DhcpMessageType::from_u8(255), None);
+        }
+
+        #[test]
+        fn test_display() {
+            assert_eq!(format!("{}", DhcpMessageType::Discover), "DISCOVER");
+            assert_eq!(format!("{}", DhcpMessageType::Offer), "OFFER");
+            assert_eq!(format!("{}", DhcpMessageType::Request), "REQUEST");
+            assert_eq!(format!("{}", DhcpMessageType::Decline), "DECLINE");
+            assert_eq!(format!("{}", DhcpMessageType::Ack), "ACK");
+            assert_eq!(format!("{}", DhcpMessageType::Nak), "NAK");
+            assert_eq!(format!("{}", DhcpMessageType::Release), "RELEASE");
+            assert_eq!(format!("{}", DhcpMessageType::Inform), "INFORM");
+        }
+
+        #[test]
+        fn test_clone_and_copy() {
+            let msg = DhcpMessageType::Discover;
+            let cloned = msg.clone();
+            let copied = msg;
+            assert_eq!(msg, cloned);
+            assert_eq!(msg, copied);
+        }
+
+        #[test]
+        fn test_equality() {
+            assert_eq!(DhcpMessageType::Discover, DhcpMessageType::Discover);
+            assert_ne!(DhcpMessageType::Discover, DhcpMessageType::Offer);
+        }
+    }
+
+    mod dhcp_packet_tests {
+        use super::*;
+
+        #[test]
+        fn test_is_request() {
+            let packet = create_test_packet(1, vec![]);
+            assert!(packet.is_request());
+            assert!(!packet.is_reply());
+        }
+
+        #[test]
+        fn test_is_reply() {
+            let packet = create_test_packet(2, vec![]);
+            assert!(packet.is_reply());
+            assert!(!packet.is_request());
+        }
+
+        #[test]
+        fn test_message_type_present() {
+            let packet = create_test_packet(
+                1,
+                vec![DhcpOption::MessageType(DhcpMessageType::Discover)],
+            );
+            assert_eq!(packet.message_type(), Some(DhcpMessageType::Discover));
+        }
+
+        #[test]
+        fn test_message_type_absent() {
+            let packet = create_test_packet(1, vec![]);
+            assert_eq!(packet.message_type(), None);
+        }
+
+        #[test]
+        fn test_message_type_among_other_options() {
+            let packet = create_test_packet(
+                1,
+                vec![
+                    DhcpOption::VendorClassId("PXEClient".to_string()),
+                    DhcpOption::MessageType(DhcpMessageType::Request),
+                    DhcpOption::ClientArch(7),
+                ],
+            );
+            assert_eq!(packet.message_type(), Some(DhcpMessageType::Request));
+        }
+
+        #[test]
+        fn test_vendor_class_id_present() {
+            let packet = create_test_packet(
+                1,
+                vec![DhcpOption::VendorClassId("PXEClient:Arch:00007".to_string())],
+            );
+            assert_eq!(packet.vendor_class_id(), Some("PXEClient:Arch:00007"));
+        }
+
+        #[test]
+        fn test_vendor_class_id_absent() {
+            let packet = create_test_packet(1, vec![]);
+            assert_eq!(packet.vendor_class_id(), None);
+        }
+
+        #[test]
+        fn test_client_arch_present() {
+            let packet = create_test_packet(1, vec![DhcpOption::ClientArch(7)]);
+            assert_eq!(packet.client_arch(), Some(7));
+        }
+
+        #[test]
+        fn test_client_arch_absent() {
+            let packet = create_test_packet(1, vec![]);
+            assert_eq!(packet.client_arch(), None);
+        }
+
+        #[test]
+        fn test_client_uuid_present() {
+            let uuid = vec![0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07];
+            let packet = create_test_packet(1, vec![DhcpOption::ClientUuid(uuid.clone())]);
+            assert_eq!(packet.client_uuid(), Some(uuid.as_slice()));
+        }
+
+        #[test]
+        fn test_client_uuid_absent() {
+            let packet = create_test_packet(1, vec![]);
+            assert_eq!(packet.client_uuid(), None);
+        }
+
+        #[test]
+        fn test_all_accessors_with_full_options() {
+            let packet = create_test_packet(
+                1,
+                vec![
+                    DhcpOption::MessageType(DhcpMessageType::Discover),
+                    DhcpOption::VendorClassId("PXEClient".to_string()),
+                    DhcpOption::ClientArch(7),
+                    DhcpOption::ClientUuid(vec![0x01, 0x02]),
+                    DhcpOption::RequestedIp(Ipv4Addr::new(192, 168, 1, 100)),
+                    DhcpOption::ServerIdentifier(Ipv4Addr::new(192, 168, 1, 1)),
+                    DhcpOption::ClientId(vec![0x01, 0xaa, 0xbb]),
+                    DhcpOption::ClientNdi(vec![0x01, 0x03, 0x10]),
+                    DhcpOption::Unknown(200, vec![0x01, 0x02]),
+                ],
+            );
+
+            assert_eq!(packet.message_type(), Some(DhcpMessageType::Discover));
+            assert_eq!(packet.vendor_class_id(), Some("PXEClient"));
+            assert_eq!(packet.client_arch(), Some(7));
+            assert_eq!(packet.client_uuid(), Some(&[0x01, 0x02][..]));
+        }
+
+        #[test]
+        fn test_clone() {
+            let packet = create_test_packet(
+                1,
+                vec![DhcpOption::MessageType(DhcpMessageType::Discover)],
+            );
+            let cloned = packet.clone();
+
+            assert_eq!(cloned.op, packet.op);
+            assert_eq!(cloned.xid, packet.xid);
+            assert_eq!(cloned.chaddr, packet.chaddr);
+            assert_eq!(cloned.message_type(), packet.message_type());
+        }
+    }
+
+    mod dhcp_option_tests {
+        use super::*;
+
+        #[test]
+        fn test_option_variants() {
+            // Just ensure all variants can be constructed
+            let _ = DhcpOption::MessageType(DhcpMessageType::Discover);
+            let _ = DhcpOption::RequestedIp(Ipv4Addr::new(192, 168, 1, 1));
+            let _ = DhcpOption::ServerIdentifier(Ipv4Addr::new(192, 168, 1, 1));
+            let _ = DhcpOption::VendorClassId("test".to_string());
+            let _ = DhcpOption::ClientId(vec![0x01]);
+            let _ = DhcpOption::ClientArch(7);
+            let _ = DhcpOption::ClientNdi(vec![0x01]);
+            let _ = DhcpOption::ClientUuid(vec![0x01]);
+            let _ = DhcpOption::Unknown(100, vec![0x01]);
+        }
+
+        #[test]
+        fn test_option_clone() {
+            let opt = DhcpOption::VendorClassId("PXEClient".to_string());
+            let cloned = opt.clone();
+            if let DhcpOption::VendorClassId(s) = cloned {
+                assert_eq!(s, "PXEClient");
+            } else {
+                panic!("Clone changed variant");
+            }
+        }
+    }
+}
