@@ -144,3 +144,237 @@ mod hex {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod pxe_client_arch_tests {
+        use super::*;
+
+        #[test]
+        fn test_from_u16_known_values() {
+            assert_eq!(PxeClientArch::from_u16(0), PxeClientArch::IntelX86Bios);
+            assert_eq!(PxeClientArch::from_u16(1), PxeClientArch::NecPc98);
+            assert_eq!(PxeClientArch::from_u16(2), PxeClientArch::Efi386);
+            assert_eq!(PxeClientArch::from_u16(6), PxeClientArch::EfiBC);
+            assert_eq!(PxeClientArch::from_u16(7), PxeClientArch::EfiX64);
+            assert_eq!(PxeClientArch::from_u16(9), PxeClientArch::EfiArm32);
+            assert_eq!(PxeClientArch::from_u16(11), PxeClientArch::EfiArm64);
+        }
+
+        #[test]
+        fn test_from_u16_unknown_values() {
+            assert_eq!(PxeClientArch::from_u16(3), PxeClientArch::Unknown(3));
+            assert_eq!(PxeClientArch::from_u16(100), PxeClientArch::Unknown(100));
+            assert_eq!(PxeClientArch::from_u16(65535), PxeClientArch::Unknown(65535));
+        }
+
+        #[test]
+        fn test_is_efi() {
+            assert!(PxeClientArch::Efi386.is_efi());
+            assert!(PxeClientArch::EfiBC.is_efi());
+            assert!(PxeClientArch::EfiX64.is_efi());
+            assert!(PxeClientArch::EfiArm32.is_efi());
+            assert!(PxeClientArch::EfiArm64.is_efi());
+
+            assert!(!PxeClientArch::IntelX86Bios.is_efi());
+            assert!(!PxeClientArch::NecPc98.is_efi());
+            assert!(!PxeClientArch::Unknown(99).is_efi());
+        }
+
+        #[test]
+        fn test_is_bios() {
+            assert!(PxeClientArch::IntelX86Bios.is_bios());
+
+            assert!(!PxeClientArch::Efi386.is_bios());
+            assert!(!PxeClientArch::EfiX64.is_bios());
+            assert!(!PxeClientArch::NecPc98.is_bios());
+            assert!(!PxeClientArch::Unknown(0).is_bios());
+        }
+
+        #[test]
+        fn test_display() {
+            assert_eq!(format!("{}", PxeClientArch::IntelX86Bios), "x86 BIOS");
+            assert_eq!(format!("{}", PxeClientArch::NecPc98), "NEC/PC98");
+            assert_eq!(format!("{}", PxeClientArch::Efi386), "EFI x86");
+            assert_eq!(format!("{}", PxeClientArch::EfiBC), "EFI BC");
+            assert_eq!(format!("{}", PxeClientArch::EfiX64), "EFI x64");
+            assert_eq!(format!("{}", PxeClientArch::EfiArm32), "EFI ARM32");
+            assert_eq!(format!("{}", PxeClientArch::EfiArm64), "EFI ARM64");
+            assert_eq!(format!("{}", PxeClientArch::Unknown(42)), "Unknown(42)");
+        }
+    }
+
+    mod pxe_info_tests {
+        use super::*;
+
+        #[test]
+        fn test_from_vendor_class_valid_pxe() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:00007:UNDI:003016");
+            assert!(info.is_some());
+
+            let info = info.unwrap();
+            assert_eq!(info.vendor_class, "PXEClient:Arch:00007:UNDI:003016");
+            assert_eq!(info.architecture, Some(PxeClientArch::EfiX64));
+            assert!(info.uuid.is_none());
+        }
+
+        #[test]
+        fn test_from_vendor_class_bios() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:00000:UNDI:002001").unwrap();
+            assert_eq!(info.architecture, Some(PxeClientArch::IntelX86Bios));
+        }
+
+        #[test]
+        fn test_from_vendor_class_minimal() {
+            let info = PxeInfo::from_vendor_class("PXEClient");
+            assert!(info.is_some());
+
+            let info = info.unwrap();
+            assert_eq!(info.vendor_class, "PXEClient");
+            assert!(info.architecture.is_none());
+        }
+
+        #[test]
+        fn test_from_vendor_class_non_pxe() {
+            assert!(PxeInfo::from_vendor_class("MSFT 5.0").is_none());
+            assert!(PxeInfo::from_vendor_class("dhcpcd").is_none());
+            assert!(PxeInfo::from_vendor_class("").is_none());
+            assert!(PxeInfo::from_vendor_class("pxeclient").is_none()); // Case sensitive
+        }
+
+        #[test]
+        fn test_from_vendor_class_arch_without_colon() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:00007").unwrap();
+            assert_eq!(info.architecture, Some(PxeClientArch::EfiX64));
+        }
+
+        #[test]
+        fn test_from_vendor_class_arch_with_space() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:00007 extra").unwrap();
+            assert_eq!(info.architecture, Some(PxeClientArch::EfiX64));
+        }
+
+        #[test]
+        fn test_from_vendor_class_invalid_arch_number() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:invalid:UNDI").unwrap();
+            assert!(info.architecture.is_none());
+        }
+
+        #[test]
+        fn test_with_architecture() {
+            let info = PxeInfo::from_vendor_class("PXEClient")
+                .unwrap()
+                .with_architecture(7);
+
+            assert_eq!(info.architecture, Some(PxeClientArch::EfiX64));
+        }
+
+        #[test]
+        fn test_with_architecture_overrides_parsed() {
+            let info = PxeInfo::from_vendor_class("PXEClient:Arch:00000:UNDI:002001")
+                .unwrap()
+                .with_architecture(7);
+
+            // Option 93 should override the parsed value
+            assert_eq!(info.architecture, Some(PxeClientArch::EfiX64));
+        }
+
+        #[test]
+        fn test_with_uuid_type_0() {
+            let uuid_bytes = [
+                0x00, // Type 0
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10,
+            ];
+
+            let info = PxeInfo::from_vendor_class("PXEClient")
+                .unwrap()
+                .with_uuid(&uuid_bytes);
+
+            assert!(info.uuid.is_some());
+            assert_eq!(
+                info.uuid.unwrap(),
+                "01020304-0506-0708-090a-0b0c0d0e0f10"
+            );
+        }
+
+        #[test]
+        fn test_with_uuid_raw_16_bytes() {
+            let uuid_bytes = [
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10,
+            ];
+
+            let info = PxeInfo::from_vendor_class("PXEClient")
+                .unwrap()
+                .with_uuid(&uuid_bytes);
+
+            assert!(info.uuid.is_some());
+            assert_eq!(
+                info.uuid.unwrap(),
+                "01020304-0506-0708-090a-0b0c0d0e0f10"
+            );
+        }
+
+        #[test]
+        fn test_with_uuid_too_short() {
+            let short_uuid = [0x01, 0x02, 0x03];
+
+            let info = PxeInfo::from_vendor_class("PXEClient")
+                .unwrap()
+                .with_uuid(&short_uuid);
+
+            // UUID should not be set if too short
+            assert!(info.uuid.is_none());
+        }
+
+        #[test]
+        fn test_with_uuid_empty() {
+            let info = PxeInfo::from_vendor_class("PXEClient")
+                .unwrap()
+                .with_uuid(&[]);
+
+            assert!(info.uuid.is_none());
+        }
+    }
+
+    mod format_uuid_tests {
+        use super::*;
+
+        #[test]
+        fn test_format_uuid_valid() {
+            let bytes = [
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+                0xdd, 0xee, 0xff,
+            ];
+            assert_eq!(
+                format_uuid(&bytes),
+                "00112233-4455-6677-8899-aabbccddeeff"
+            );
+        }
+
+        #[test]
+        fn test_format_uuid_short() {
+            let bytes = [0x01, 0x02, 0x03];
+            assert_eq!(format_uuid(&bytes), "010203");
+        }
+
+        #[test]
+        fn test_format_uuid_empty() {
+            assert_eq!(format_uuid(&[]), "");
+        }
+    }
+
+    mod hex_tests {
+        use super::hex;
+
+        #[test]
+        fn test_encode() {
+            assert_eq!(hex::encode(&[0x00, 0xff, 0x0a, 0xbc]), "00ff0abc");
+            assert_eq!(hex::encode(&[]), "");
+            assert_eq!(hex::encode(&[0x42]), "42");
+        }
+    }
+}

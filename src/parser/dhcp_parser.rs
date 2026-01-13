@@ -236,31 +236,26 @@ impl Default for DhcpParser {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_parse_minimum_packet() {
-        let parser = DhcpParser::new();
-
-        // Create a minimal valid DHCP packet
+    /// Helper to create a valid DHCP packet with customizable fields
+    fn create_test_packet() -> Vec<u8> {
         let mut packet = vec![0u8; 300];
-
-        // Op: BOOTREQUEST
-        packet[0] = 1;
-        // Hardware type: Ethernet
-        packet[1] = 1;
-        // Hardware address length
-        packet[2] = 6;
-        // XID
+        packet[0] = 1; // BOOTREQUEST
+        packet[1] = 1; // Ethernet
+        packet[2] = 6; // MAC length
         packet[4..8].copy_from_slice(&0x12345678u32.to_be_bytes());
-        // MAC address
         packet[28..34].copy_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]);
-        // Magic cookie
         packet[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
-        // Message type option (DISCOVER)
         packet[240] = option_codes::MESSAGE_TYPE;
         packet[241] = 1;
         packet[242] = 1; // DISCOVER
-        // End option
         packet[243] = option_codes::END;
+        packet
+    }
+
+    #[test]
+    fn test_parse_minimum_packet() {
+        let parser = DhcpParser::new();
+        let packet = create_test_packet();
 
         let result = parser.parse(&packet);
         assert!(result.is_ok());
@@ -282,5 +277,442 @@ mod tests {
 
         let result = parser.parse(&packet);
         assert!(matches!(result, Err(ParseError::PacketTooShort { .. })));
+    }
+
+    #[test]
+    fn test_packet_missing_magic_cookie_space() {
+        let parser = DhcpParser::new();
+        let packet = vec![0u8; 238]; // Too short for magic cookie
+
+        let result = parser.parse(&packet);
+        assert!(matches!(result, Err(ParseError::PacketTooShort { .. })));
+    }
+
+    #[test]
+    fn test_invalid_magic_cookie() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+        packet[236..240].copy_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        let result = parser.parse(&packet);
+        assert!(matches!(result, Err(ParseError::InvalidMagicCookie)));
+    }
+
+    #[test]
+    fn test_parse_bootreply() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+        packet[0] = 2; // BOOTREPLY
+        packet[242] = 2; // OFFER
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert!(dhcp.is_reply());
+        assert!(!dhcp.is_request());
+        assert_eq!(dhcp.message_type(), Some(DhcpMessageType::Offer));
+    }
+
+    #[test]
+    fn test_parse_all_message_types() {
+        let parser = DhcpParser::new();
+
+        let types = [
+            (1, DhcpMessageType::Discover),
+            (2, DhcpMessageType::Offer),
+            (3, DhcpMessageType::Request),
+            (4, DhcpMessageType::Decline),
+            (5, DhcpMessageType::Ack),
+            (6, DhcpMessageType::Nak),
+            (7, DhcpMessageType::Release),
+            (8, DhcpMessageType::Inform),
+        ];
+
+        for (code, expected) in types {
+            let mut packet = create_test_packet();
+            packet[242] = code;
+            let dhcp = parser.parse(&packet).unwrap();
+            assert_eq!(dhcp.message_type(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn test_parse_ip_addresses() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // ciaddr
+        packet[12..16].copy_from_slice(&[192, 168, 1, 100]);
+        // yiaddr
+        packet[16..20].copy_from_slice(&[192, 168, 1, 101]);
+        // siaddr
+        packet[20..24].copy_from_slice(&[192, 168, 1, 1]);
+        // giaddr
+        packet[24..28].copy_from_slice(&[192, 168, 1, 254]);
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.ciaddr, Ipv4Addr::new(192, 168, 1, 100));
+        assert_eq!(dhcp.yiaddr, Ipv4Addr::new(192, 168, 1, 101));
+        assert_eq!(dhcp.siaddr, Ipv4Addr::new(192, 168, 1, 1));
+        assert_eq!(dhcp.giaddr, Ipv4Addr::new(192, 168, 1, 254));
+    }
+
+    #[test]
+    fn test_parse_secs_and_flags() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        packet[8..10].copy_from_slice(&0x1234u16.to_be_bytes());
+        packet[10..12].copy_from_slice(&0x8000u16.to_be_bytes()); // Broadcast flag
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.secs, 0x1234);
+        assert_eq!(dhcp.flags, 0x8000);
+    }
+
+    #[test]
+    fn test_parse_sname_field() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let sname = b"pxeserver.local";
+        packet[44..44 + sname.len()].copy_from_slice(sname);
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.sname, Some("pxeserver.local".to_string()));
+    }
+
+    #[test]
+    fn test_parse_file_field() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let file = b"pxelinux.0";
+        packet[108..108 + file.len()].copy_from_slice(file);
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.file, Some("pxelinux.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_empty_sname_and_file() {
+        let parser = DhcpParser::new();
+        let packet = create_test_packet();
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.sname, None);
+        assert_eq!(dhcp.file, None);
+    }
+
+    #[test]
+    fn test_parse_vendor_class_id() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let vendor_class = b"PXEClient:Arch:00007:UNDI:003016";
+        packet[243] = option_codes::VENDOR_CLASS_ID;
+        packet[244] = vendor_class.len() as u8;
+        packet[245..245 + vendor_class.len()].copy_from_slice(vendor_class);
+        packet[245 + vendor_class.len()] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(
+            dhcp.vendor_class_id(),
+            Some("PXEClient:Arch:00007:UNDI:003016")
+        );
+    }
+
+    #[test]
+    fn test_parse_client_arch() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Add client arch option (Option 93) - EFI x64 = 7
+        packet[243] = option_codes::CLIENT_ARCH;
+        packet[244] = 2; // length
+        packet[245..247].copy_from_slice(&7u16.to_be_bytes());
+        packet[247] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.client_arch(), Some(7));
+    }
+
+    #[test]
+    fn test_parse_client_uuid() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Add client UUID option (Option 97)
+        let uuid = [
+            0x00, // Type 0 = UUID
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        packet[243] = option_codes::CLIENT_UUID;
+        packet[244] = uuid.len() as u8;
+        packet[245..245 + uuid.len()].copy_from_slice(&uuid);
+        packet[245 + uuid.len()] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert!(dhcp.client_uuid().is_some());
+        assert_eq!(dhcp.client_uuid().unwrap().len(), 17);
+    }
+
+    #[test]
+    fn test_parse_requested_ip() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        packet[243] = option_codes::REQUESTED_IP;
+        packet[244] = 4;
+        packet[245..249].copy_from_slice(&[192, 168, 1, 50]);
+        packet[249] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        let requested = dhcp.options.iter().find_map(|opt| {
+            if let DhcpOption::RequestedIp(ip) = opt {
+                Some(*ip)
+            } else {
+                None
+            }
+        });
+        assert_eq!(requested, Some(Ipv4Addr::new(192, 168, 1, 50)));
+    }
+
+    #[test]
+    fn test_parse_server_identifier() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        packet[243] = option_codes::SERVER_ID;
+        packet[244] = 4;
+        packet[245..249].copy_from_slice(&[192, 168, 1, 1]);
+        packet[249] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        let server_id = dhcp.options.iter().find_map(|opt| {
+            if let DhcpOption::ServerIdentifier(ip) = opt {
+                Some(*ip)
+            } else {
+                None
+            }
+        });
+        assert_eq!(server_id, Some(Ipv4Addr::new(192, 168, 1, 1)));
+    }
+
+    #[test]
+    fn test_parse_with_pad_options() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Add PAD options before END
+        packet[243] = option_codes::PAD;
+        packet[244] = option_codes::PAD;
+        packet[245] = option_codes::PAD;
+        packet[246] = option_codes::END;
+
+        let result = parser.parse(&packet);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_unknown_option() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Add an unknown option (code 200)
+        packet[243] = 200;
+        packet[244] = 3;
+        packet[245..248].copy_from_slice(&[0x01, 0x02, 0x03]);
+        packet[248] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        let unknown = dhcp.options.iter().find(|opt| {
+            matches!(opt, DhcpOption::Unknown(200, _))
+        });
+        assert!(unknown.is_some());
+    }
+
+    #[test]
+    fn test_parse_truncated_option_length() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Option with length but insufficient data space
+        packet[243] = option_codes::VENDOR_CLASS_ID;
+        packet[244] = 100; // Claims 100 bytes
+
+        // Truncate packet so option data is incomplete
+        packet.truncate(250); // Only 5 bytes available after length, but claims 100
+
+        let result = parser.parse(&packet);
+        assert!(matches!(result, Err(ParseError::InvalidOption { .. })));
+    }
+
+    #[test]
+    fn test_parse_option_missing_length() {
+        let parser = DhcpParser::new();
+        let mut packet = vec![0u8; 241]; // Just enough for header + magic + 1 byte
+        packet[0] = 1;
+        packet[1] = 1;
+        packet[2] = 6;
+        packet[236..240].copy_from_slice(&DHCP_MAGIC_COOKIE);
+        packet[240] = option_codes::VENDOR_CLASS_ID; // No length byte follows
+
+        let result = parser.parse(&packet);
+        assert!(matches!(result, Err(ParseError::InvalidOption { .. })));
+    }
+
+    #[test]
+    fn test_parse_client_id() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let client_id = [0x01, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]; // Type + MAC
+        packet[243] = option_codes::CLIENT_ID;
+        packet[244] = client_id.len() as u8;
+        packet[245..245 + client_id.len()].copy_from_slice(&client_id);
+        packet[245 + client_id.len()] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        let cid = dhcp.options.iter().find_map(|opt| {
+            if let DhcpOption::ClientId(data) = opt {
+                Some(data.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(cid, Some(client_id.to_vec()));
+    }
+
+    #[test]
+    fn test_parse_client_ndi() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let ndi = [0x01, 0x03, 0x10]; // Type, major, minor
+        packet[243] = option_codes::CLIENT_NDI;
+        packet[244] = ndi.len() as u8;
+        packet[245..245 + ndi.len()].copy_from_slice(&ndi);
+        packet[245 + ndi.len()] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        let parsed_ndi = dhcp.options.iter().find_map(|opt| {
+            if let DhcpOption::ClientNdi(data) = opt {
+                Some(data.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(parsed_ndi, Some(ndi.to_vec()));
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let parser = DhcpParser::default();
+        let packet = create_test_packet();
+        assert!(parser.parse(&packet).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_message_type_value() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+        packet[242] = 99; // Invalid message type
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.message_type(), None);
+    }
+
+    #[test]
+    fn test_empty_message_type_option() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+        packet[241] = 0; // Zero-length message type option
+        packet[242] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.message_type(), None);
+    }
+
+    #[test]
+    fn test_short_requested_ip_option() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        packet[243] = option_codes::REQUESTED_IP;
+        packet[244] = 2; // Too short (needs 4)
+        packet[245..247].copy_from_slice(&[192, 168]);
+        packet[247] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        // Option should be skipped due to invalid length
+        let requested = dhcp.options.iter().find(|opt| {
+            matches!(opt, DhcpOption::RequestedIp(_))
+        });
+        assert!(requested.is_none());
+    }
+
+    #[test]
+    fn test_short_client_arch_option() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        packet[243] = option_codes::CLIENT_ARCH;
+        packet[244] = 1; // Too short (needs 2)
+        packet[245] = 0x07;
+        packet[246] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.client_arch(), None);
+    }
+
+    #[test]
+    fn test_invalid_utf8_vendor_class() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        // Invalid UTF-8 sequence
+        let invalid_utf8 = [0xff, 0xfe, 0x00, 0x01];
+        packet[243] = option_codes::VENDOR_CLASS_ID;
+        packet[244] = invalid_utf8.len() as u8;
+        packet[245..245 + invalid_utf8.len()].copy_from_slice(&invalid_utf8);
+        packet[245 + invalid_utf8.len()] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        // Invalid UTF-8 should result in None
+        assert_eq!(dhcp.vendor_class_id(), None);
+    }
+
+    #[test]
+    fn test_multiple_options() {
+        let parser = DhcpParser::new();
+        let mut packet = create_test_packet();
+
+        let mut offset = 243;
+
+        // Vendor class
+        let vendor = b"PXEClient";
+        packet[offset] = option_codes::VENDOR_CLASS_ID;
+        packet[offset + 1] = vendor.len() as u8;
+        packet[offset + 2..offset + 2 + vendor.len()].copy_from_slice(vendor);
+        offset += 2 + vendor.len();
+
+        // Client arch
+        packet[offset] = option_codes::CLIENT_ARCH;
+        packet[offset + 1] = 2;
+        packet[offset + 2..offset + 4].copy_from_slice(&7u16.to_be_bytes());
+        offset += 4;
+
+        // Requested IP
+        packet[offset] = option_codes::REQUESTED_IP;
+        packet[offset + 1] = 4;
+        packet[offset + 2..offset + 6].copy_from_slice(&[192, 168, 1, 100]);
+        offset += 6;
+
+        packet[offset] = option_codes::END;
+
+        let dhcp = parser.parse(&packet).unwrap();
+        assert_eq!(dhcp.vendor_class_id(), Some("PXEClient"));
+        assert_eq!(dhcp.client_arch(), Some(7));
+        assert!(dhcp.message_type().is_some());
     }
 }

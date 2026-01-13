@@ -110,11 +110,21 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn create_test_packet(vendor_class: Option<&str>, msg_type: DhcpMessageType) -> DhcpPacket {
+        create_test_packet_with_options(vendor_class, msg_type, vec![])
+    }
+
+    fn create_test_packet_with_options(
+        vendor_class: Option<&str>,
+        msg_type: DhcpMessageType,
+        extra_options: Vec<DhcpOption>,
+    ) -> DhcpPacket {
         let mut options = vec![DhcpOption::MessageType(msg_type)];
 
         if let Some(vc) = vendor_class {
             options.push(DhcpOption::VendorClassId(vc.to_string()));
         }
+
+        options.extend(extra_options);
 
         DhcpPacket {
             op: 1,
@@ -134,6 +144,19 @@ mod tests {
         }
     }
 
+    fn create_reply_packet(
+        vendor_class: Option<&str>,
+        msg_type: DhcpMessageType,
+        yiaddr: Ipv4Addr,
+        siaddr: Ipv4Addr,
+    ) -> DhcpPacket {
+        let mut packet = create_test_packet(vendor_class, msg_type);
+        packet.op = 2; // BOOTREPLY
+        packet.yiaddr = yiaddr;
+        packet.siaddr = siaddr;
+        packet
+    }
+
     #[test]
     fn test_detect_pxe_discover() {
         let detector = PxeDetector::new();
@@ -148,6 +171,69 @@ mod tests {
         let event = event.unwrap();
         assert_eq!(event.message_type, DhcpMessageType::Discover);
         assert!(event.pxe_info.vendor_class.starts_with("PXEClient"));
+        assert!(event.assigned_ip.is_none());
+        assert!(event.server_ip.is_none());
+    }
+
+    #[test]
+    fn test_detect_pxe_request() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Request,
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Request);
+        assert!(event.is_client_request());
+    }
+
+    #[test]
+    fn test_detect_pxe_offer() {
+        let detector = PxeDetector::new();
+        let packet = create_reply_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Offer,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Offer);
+        assert_eq!(event.assigned_ip, Some(Ipv4Addr::new(192, 168, 1, 100)));
+        assert_eq!(event.server_ip, Some(Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(event.is_server_response());
+    }
+
+    #[test]
+    fn test_detect_pxe_ack() {
+        let detector = PxeDetector::new();
+        let packet = create_reply_packet(
+            Some("PXEClient:Arch:00007:UNDI:003016"),
+            DhcpMessageType::Ack,
+            Ipv4Addr::new(192, 168, 1, 100),
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(event.message_type, DhcpMessageType::Ack);
+        assert!(event.is_server_response());
+    }
+
+    #[test]
+    fn test_detect_uses_ciaddr_if_yiaddr_unspecified() {
+        let detector = PxeDetector::new();
+        let mut packet = create_reply_packet(
+            Some("PXEClient"),
+            DhcpMessageType::Ack,
+            Ipv4Addr::UNSPECIFIED,
+            Ipv4Addr::new(192, 168, 1, 1),
+        );
+        packet.ciaddr = Ipv4Addr::new(192, 168, 1, 50);
+
+        let event = detector.detect(&packet).unwrap();
+        // Should fall back to ciaddr when yiaddr is unspecified
+        assert_eq!(event.assigned_ip, Some(Ipv4Addr::new(192, 168, 1, 50)));
     }
 
     #[test]
@@ -157,6 +243,35 @@ mod tests {
 
         let event = detector.detect(&packet);
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_no_vendor_class_ignored() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(None, DhcpMessageType::Discover);
+
+        let event = detector.detect(&packet);
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_non_relevant_message_type_ignored() {
+        let detector = PxeDetector::new();
+
+        // DECLINE, NAK, RELEASE, INFORM should be ignored
+        for msg_type in [
+            DhcpMessageType::Decline,
+            DhcpMessageType::Nak,
+            DhcpMessageType::Release,
+            DhcpMessageType::Inform,
+        ] {
+            let packet = create_test_packet(Some("PXEClient"), msg_type);
+            assert!(
+                detector.detect(&packet).is_none(),
+                "Should ignore {:?}",
+                msg_type
+            );
+        }
     }
 
     #[test]
@@ -171,5 +286,157 @@ mod tests {
 
         let non_pxe_packet = create_test_packet(Some("MSFT 5.0"), DhcpMessageType::Discover);
         assert!(!detector.is_pxe_client(&non_pxe_packet));
+
+        let no_vendor_packet = create_test_packet(None, DhcpMessageType::Discover);
+        assert!(!detector.is_pxe_client(&no_vendor_packet));
+    }
+
+    #[test]
+    fn test_is_pxe_client_case_sensitive() {
+        let detector = PxeDetector::new();
+
+        // Should be case-sensitive
+        let lowercase = create_test_packet(Some("pxeclient"), DhcpMessageType::Discover);
+        assert!(!detector.is_pxe_client(&lowercase));
+    }
+
+    #[test]
+    fn test_architecture_from_option_93() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet_with_options(
+            Some("PXEClient"),
+            DhcpMessageType::Discover,
+            vec![DhcpOption::ClientArch(7)],
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(
+            event.pxe_info.architecture,
+            Some(crate::domain::PxeClientArch::EfiX64)
+        );
+    }
+
+    #[test]
+    fn test_uuid_from_option_97() {
+        let detector = PxeDetector::new();
+        let uuid_bytes = vec![
+            0x00, // Type
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ];
+        let packet = create_test_packet_with_options(
+            Some("PXEClient"),
+            DhcpMessageType::Discover,
+            vec![DhcpOption::ClientUuid(uuid_bytes)],
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert!(event.pxe_info.uuid.is_some());
+    }
+
+    #[test]
+    fn test_mac_address_captured() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(Some("PXEClient"), DhcpMessageType::Discover);
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(
+            event.client_mac,
+            MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff)
+        );
+    }
+
+    #[test]
+    fn test_transaction_id_captured() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(Some("PXEClient"), DhcpMessageType::Discover);
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(event.transaction_id, 0x12345678);
+    }
+
+    #[test]
+    fn test_default_impl() {
+        let detector = PxeDetector::default();
+        let packet = create_test_packet(Some("PXEClient"), DhcpMessageType::Discover);
+        assert!(detector.detect(&packet).is_some());
+    }
+
+    #[test]
+    fn test_with_include_non_pxe() {
+        let detector = PxeDetector::new().with_include_non_pxe(true);
+        // This currently doesn't change behavior, but tests the builder pattern
+        let packet = create_test_packet(Some("PXEClient"), DhcpMessageType::Discover);
+        assert!(detector.detect(&packet).is_some());
+    }
+
+    #[test]
+    fn test_minimal_pxe_client_string() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(Some("PXEClient"), DhcpMessageType::Discover);
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(event.pxe_info.vendor_class, "PXEClient");
+        // No architecture parsed from minimal string
+        assert!(event.pxe_info.architecture.is_none());
+    }
+
+    #[test]
+    fn test_architecture_from_vendor_class() {
+        let detector = PxeDetector::new();
+        let packet = create_test_packet(
+            Some("PXEClient:Arch:00000:UNDI:002001"),
+            DhcpMessageType::Discover,
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        assert_eq!(
+            event.pxe_info.architecture,
+            Some(crate::domain::PxeClientArch::IntelX86Bios)
+        );
+    }
+
+    #[test]
+    fn test_option_93_overrides_vendor_class_arch() {
+        let detector = PxeDetector::new();
+        // Vendor class says BIOS (0), but Option 93 says EFI x64 (7)
+        let packet = create_test_packet_with_options(
+            Some("PXEClient:Arch:00000:UNDI:002001"),
+            DhcpMessageType::Discover,
+            vec![DhcpOption::ClientArch(7)],
+        );
+
+        let event = detector.detect(&packet).unwrap();
+        // Option 93 should take precedence
+        assert_eq!(
+            event.pxe_info.architecture,
+            Some(crate::domain::PxeClientArch::EfiX64)
+        );
+    }
+
+    #[test]
+    fn test_no_message_type_option() {
+        let detector = PxeDetector::new();
+
+        // Create packet without message type option
+        let packet = DhcpPacket {
+            op: 1,
+            htype: 1,
+            hlen: 6,
+            xid: 0x12345678,
+            secs: 0,
+            flags: 0,
+            ciaddr: Ipv4Addr::UNSPECIFIED,
+            yiaddr: Ipv4Addr::UNSPECIFIED,
+            siaddr: Ipv4Addr::UNSPECIFIED,
+            giaddr: Ipv4Addr::UNSPECIFIED,
+            chaddr: MacAddr6::new(0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff),
+            sname: None,
+            file: None,
+            options: vec![DhcpOption::VendorClassId("PXEClient".to_string())],
+        };
+
+        // Should return None because message type is required
+        assert!(detector.detect(&packet).is_none());
     }
 }
