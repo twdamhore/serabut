@@ -17,7 +17,7 @@ use clap::Parser;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use serabut::capture::PnetCapture;
+use serabut::capture::{PacketCapture, PnetCapture};
 use serabut::http::CloudInitServer;
 use serabut::netboot::{AutoinstallConfig, BootloaderConfigGenerator, NetbootConfigs, NetbootManager};
 use serabut::proxydhcp::ProxyDhcpServer;
@@ -358,7 +358,7 @@ fn main() {
     info!("=== Starting PXE boot monitor ===");
 
     // Create the capture backend
-    let capture = match &args.interface {
+    let mut capture = match &args.interface {
         Some(name) => match PnetCapture::new(name) {
             Ok(c) => c,
             Err(e) => {
@@ -377,6 +377,9 @@ fn main() {
             }
         },
     };
+
+    // Set the running flag so capture stops on Ctrl+C
+    capture.set_running(running.clone());
 
     // Create the reporter
     let reporter = ConsoleReporter::new()
