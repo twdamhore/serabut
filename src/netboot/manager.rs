@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
+use regex::Regex;
 use sha2::{Digest, Sha256};
 use tar::Archive;
 use tracing::{debug, info, warn};
@@ -51,7 +52,10 @@ impl NetbootManager {
         &self.config
     }
 
-    /// Ensure netboot image is downloaded and up to date.
+    /// Ensure netboot image is downloaded and ready.
+    ///
+    /// For Ubuntu, dynamically discovers the latest netboot filename from the releases page.
+    /// Always downloads fresh since netboot images are small (<100MB).
     ///
     /// Returns the path to the TFTP root directory.
     pub fn ensure_netboot_ready(&self) -> Result<PathBuf> {
@@ -61,64 +65,74 @@ impl NetbootManager {
         fs::create_dir_all(&self.tftp_root)
             .context("Failed to create TFTP root directory")?;
 
-        info!("Checking for {} netboot image...", self.config.name);
+        info!("Preparing {} netboot image...", self.config.name);
 
-        let archive_path = self.data_dir.join(&self.config.archive_filename);
-        let mut need_download = true;
-
-        // Try to verify existing file
-        if archive_path.exists() {
-            info!("Found existing archive, verifying...");
-
-            if let Some(expected) = self.get_expected_sha256()? {
-                let local_sha256 = self.compute_sha256(&archive_path)?;
-                debug!("Local SHA256: {}", local_sha256);
-                debug!("Expected SHA256: {}", expected);
-
-                if local_sha256 == expected {
-                    info!("Archive is up to date");
-                    need_download = false;
-                } else {
-                    warn!("SHA256 mismatch, re-downloading...");
-                }
-            } else {
-                // No SHA256 verification available, check if file is non-empty
-                let metadata = fs::metadata(&archive_path)?;
-                if metadata.len() > 0 {
-                    info!("Archive exists (no SHA256 verification available)");
-                    need_download = false;
-                }
-            }
+        // Discover actual filename for Ubuntu (may change with point releases)
+        let (archive_filename, archive_url) = if self.config.id.starts_with("ubuntu") {
+            self.discover_ubuntu_netboot()?
         } else {
-            info!("Archive not found, downloading...");
-        }
+            (self.config.archive_filename.clone(), self.config.archive_url())
+        };
 
-        if need_download {
-            self.download_archive(&archive_path)?;
+        let archive_path = self.data_dir.join(&archive_filename);
 
-            // Verify if possible
-            if let Some(expected) = self.get_expected_sha256()? {
-                let local_sha256 = self.compute_sha256(&archive_path)?;
-                if local_sha256 != expected {
-                    return Err(anyhow!(
-                        "SHA256 verification failed after download. Expected: {}, Got: {}",
-                        expected,
-                        local_sha256
-                    ));
-                }
-                info!("SHA256 verification passed");
+        // Always download fresh - netboot images are small and may be updated
+        info!("Downloading {} ...", archive_url);
+        self.download_archive_from_url(&archive_url, &archive_path)?;
+
+        // Verify SHA256 if available
+        if let Some(expected) = self.get_expected_sha256_for(&archive_filename)? {
+            let local_sha256 = self.compute_sha256(&archive_path)?;
+            if local_sha256 != expected {
+                return Err(anyhow!(
+                    "SHA256 verification failed. Expected: {}, Got: {}",
+                    expected,
+                    local_sha256
+                ));
             }
+            info!("SHA256 verification passed");
         }
 
-        // Always extract to ensure files are correct
-        // (in case they were modified externally)
+        // Extract the archive
         self.extract_archive(&archive_path)?;
 
         Ok(self.tftp_root.clone())
     }
 
-    /// Get expected SHA256 hash for the archive.
-    fn get_expected_sha256(&self) -> Result<Option<String>> {
+    /// Discover the latest Ubuntu netboot filename from the releases page.
+    fn discover_ubuntu_netboot(&self) -> Result<(String, String)> {
+        let base_url = &self.config.base_url;
+        info!("Discovering netboot image from {} ...", base_url);
+
+        let response = reqwest::blocking::get(base_url)
+            .context("Failed to fetch releases page")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to fetch releases page: HTTP {}", response.status()));
+        }
+
+        let body = response.text().context("Failed to read releases page")?;
+
+        // Look for ubuntu-24.04.X-netboot-amd64.tar.gz pattern
+        let pattern = format!(
+            r#"href="(ubuntu-\d+\.\d+(?:\.\d+)?-netboot-amd64\.tar\.gz)""#
+        );
+        let re = Regex::new(&pattern).context("Failed to compile regex")?;
+
+        if let Some(captures) = re.captures(&body) {
+            let filename = captures.get(1).unwrap().as_str().to_string();
+            let url = format!("{}/{}", base_url, filename);
+            info!("Found netboot image: {}", filename);
+            return Ok((filename, url));
+        }
+
+        Err(anyhow!(
+            "Could not find netboot tarball on releases page. Looking for pattern: ubuntu-*.netboot-amd64.tar.gz"
+        ))
+    }
+
+    /// Get expected SHA256 hash for a specific archive filename.
+    fn get_expected_sha256_for(&self, archive_filename: &str) -> Result<Option<String>> {
         // First check if we have a hardcoded hash
         if let Some(ref hash) = self.config.expected_sha256 {
             return Ok(Some(hash.clone()));
@@ -126,7 +140,7 @@ impl NetbootManager {
 
         // Try to fetch from SHA256SUMS
         if let Some(url) = self.config.sha256sums_url() {
-            return self.fetch_sha256_from_sums(&url);
+            return self.fetch_sha256_from_sums(&url, archive_filename);
         }
 
         // No verification available
@@ -134,7 +148,7 @@ impl NetbootManager {
     }
 
     /// Fetch SHA256 hash from a SHA256SUMS file.
-    fn fetch_sha256_from_sums(&self, url: &str) -> Result<Option<String>> {
+    fn fetch_sha256_from_sums(&self, url: &str, archive_filename: &str) -> Result<Option<String>> {
         debug!("Fetching SHA256SUMS from {}", url);
 
         let response = match reqwest::blocking::get(url) {
@@ -158,7 +172,7 @@ impl NetbootManager {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 let filename = parts[1].trim_start_matches('*');
-                if filename == self.config.archive_filename {
+                if filename == archive_filename {
                     return Ok(Some(parts[0].to_lowercase()));
                 }
             }
@@ -166,7 +180,7 @@ impl NetbootManager {
 
         warn!(
             "Could not find {} in SHA256SUMS",
-            self.config.archive_filename
+            archive_filename
         );
         Ok(None)
     }
@@ -194,13 +208,10 @@ impl NetbootManager {
         Ok(format!("{:x}", hash))
     }
 
-    /// Download the archive.
-    fn download_archive(&self, dest: &Path) -> Result<()> {
-        let url = self.config.archive_url();
-        info!("Downloading {} ...", url);
-
+    /// Download an archive from a URL.
+    fn download_archive_from_url(&self, url: &str, dest: &Path) -> Result<()> {
         let response =
-            reqwest::blocking::get(&url).context("Failed to start download")?;
+            reqwest::blocking::get(url).context("Failed to start download")?;
 
         if !response.status().is_success() {
             return Err(anyhow!("Failed to download: HTTP {}", response.status()));

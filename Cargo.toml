@@ -41,3 +41,6 @@ tokio = { version = "1.0", features = ["full"] }
 
 # Socket2 for raw socket options
 socket2 = "0.5"
+
+# Regex for parsing release pages
+regex = "1.11"
