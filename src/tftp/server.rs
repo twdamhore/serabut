@@ -233,14 +233,17 @@ impl TftpServer {
         socket.set_read_timeout(Some(Duration::from_secs(5)))?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
 
-        // Send OACK if options were requested
-        if !options.is_empty() {
+        // Send OACK if we have options to acknowledge
+        let has_options_to_ack = block_size != DEFAULT_BLOCK_SIZE || tsize_requested;
+
+        if has_options_to_ack {
             let mut oack = vec![0u8, OPCODE_OACK as u8];
 
             if block_size != DEFAULT_BLOCK_SIZE {
                 oack.extend_from_slice(b"blksize\0");
                 oack.extend_from_slice(block_size.to_string().as_bytes());
                 oack.push(0);
+                debug!("TFTP: Using block size {} for {}", block_size, filename);
             }
 
             if tsize_requested {
