@@ -272,9 +272,12 @@ impl NetbootManager {
     fn create_boot_symlinks(&self) -> Result<()> {
         // Symlinks: (target_relative_path, link_name)
         // These are relative symlinks so they work regardless of absolute path
+        // Ubuntu's grub.cfg references files at root level, but they're in amd64/
         let symlinks = [
             ("amd64/grub", "grub"),
             ("amd64/pxelinux.cfg", "pxelinux.cfg"),
+            ("amd64/linux", "linux"),
+            ("amd64/initrd", "initrd"),
         ];
 
         for (target, link_name) in symlinks {
