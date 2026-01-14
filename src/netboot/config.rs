@@ -46,83 +46,61 @@ impl NetbootConfig {
     }
 }
 
+// =============================================================================
+// VERSION REGISTRIES - Add new versions here (just one line each!)
+// =============================================================================
+
+/// Ubuntu versions: (version, codename)
+const UBUNTU_VERSIONS: &[(&str, &str)] = &[
+    ("24.04", "Noble Numbat"),
+    // ("26.04", "Plucky Puffin"),  // Add future versions here
+];
+
+/// Debian versions: (version, codename)
+const DEBIAN_VERSIONS: &[(&str, &str)] = &[
+    ("12", "bookworm"),
+    // ("13", "trixie"),  // Add future versions here
+];
+
+/// Rocky Linux versions: just the major version number
+const ROCKY_VERSIONS: &[&str] = &[
+    "9",
+    "10",
+    // "11",  // Add future versions here
+];
+
+/// AlmaLinux versions: just the major version number
+const ALMA_VERSIONS: &[&str] = &[
+    "9",
+    "10",
+    // "11",  // Add future versions here
+];
+
+// =============================================================================
+
 /// Pre-defined netboot configurations.
 pub struct NetbootConfigs;
 
 impl NetbootConfigs {
-    /// Ubuntu 24.04 LTS (Noble Numbat) - amd64
-    /// Note: Actual filename is auto-discovered from releases page
-    pub fn ubuntu_24_04() -> NetbootConfig {
+    /// Create Ubuntu LTS config for any version.
+    pub fn ubuntu(version: &str, codename: &str) -> NetbootConfig {
         NetbootConfig {
-            name: "Ubuntu 24.04 LTS (Noble Numbat)".to_string(),
-            id: "ubuntu-24.04".to_string(),
-            base_url: "https://releases.ubuntu.com/24.04".to_string(),
-            archive_filename: "ubuntu-24.04-netboot-amd64.tar.gz".to_string(), // Auto-discovered
+            name: format!("Ubuntu {} LTS ({})", version, codename),
+            id: format!("ubuntu-{}", version),
+            base_url: format!("https://releases.ubuntu.com/{}", version),
+            archive_filename: format!("ubuntu-{}-netboot-amd64.tar.gz", version),
             boot_file_bios: "amd64/pxelinux.0".to_string(),
             boot_file_efi: "amd64/grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
         }
     }
 
-    /// Rocky Linux 9 - amd64
-    /// Note: Rocky uses a different netboot structure
-    pub fn rocky_9() -> NetbootConfig {
+    /// Create Debian config for any version.
+    pub fn debian(version: &str, codename: &str) -> NetbootConfig {
         NetbootConfig {
-            name: "Rocky Linux 9".to_string(),
-            id: "rocky-9".to_string(),
-            base_url: "https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/images/pxeboot".to_string(),
-            archive_filename: "initrd.img".to_string(),
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubx64.efi".to_string(),
-            arch: NetbootArch::Amd64,
-        }
-    }
-
-    /// Rocky Linux 10 - amd64
-    pub fn rocky_10() -> NetbootConfig {
-        NetbootConfig {
-            name: "Rocky Linux 10".to_string(),
-            id: "rocky-10".to_string(),
-            base_url: "https://download.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/images/pxeboot".to_string(),
-            archive_filename: "initrd.img".to_string(),
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubx64.efi".to_string(),
-            arch: NetbootArch::Amd64,
-        }
-    }
-
-    /// AlmaLinux 9 - amd64
-    pub fn alma_9() -> NetbootConfig {
-        NetbootConfig {
-            name: "AlmaLinux 9".to_string(),
-            id: "alma-9".to_string(),
-            base_url: "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/images/pxeboot".to_string(),
-            archive_filename: "initrd.img".to_string(),
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubx64.efi".to_string(),
-            arch: NetbootArch::Amd64,
-        }
-    }
-
-    /// AlmaLinux 10 - amd64
-    pub fn alma_10() -> NetbootConfig {
-        NetbootConfig {
-            name: "AlmaLinux 10".to_string(),
-            id: "alma-10".to_string(),
-            base_url: "https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/images/pxeboot".to_string(),
-            archive_filename: "initrd.img".to_string(),
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubx64.efi".to_string(),
-            arch: NetbootArch::Amd64,
-        }
-    }
-
-    /// Debian 12 (Bookworm) - amd64
-    pub fn debian_12() -> NetbootConfig {
-        NetbootConfig {
-            name: "Debian 12 (Bookworm)".to_string(),
-            id: "debian-12".to_string(),
-            base_url: "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot".to_string(),
+            name: format!("Debian {} ({})", version, codename.chars().next().unwrap().to_uppercase().collect::<String>() + &codename[1..]),
+            id: format!("debian-{}", version),
+            base_url: format!("https://deb.debian.org/debian/dists/{}/main/installer-amd64/current/images/netboot", codename),
             archive_filename: "netboot.tar.gz".to_string(),
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubnetx64.efi.signed".to_string(),
@@ -130,41 +108,111 @@ impl NetbootConfigs {
         }
     }
 
+    /// Create Rocky Linux config for any version.
+    pub fn rocky(version: &str) -> NetbootConfig {
+        NetbootConfig {
+            name: format!("Rocky Linux {}", version),
+            id: format!("rocky-{}", version),
+            base_url: format!("https://download.rockylinux.org/pub/rocky/{}/BaseOS/x86_64/os/images/pxeboot", version),
+            archive_filename: "initrd.img".to_string(),
+            boot_file_bios: "pxelinux.0".to_string(),
+            boot_file_efi: "grubx64.efi".to_string(),
+            arch: NetbootArch::Amd64,
+        }
+    }
+
+    /// Create AlmaLinux config for any version.
+    pub fn alma(version: &str) -> NetbootConfig {
+        NetbootConfig {
+            name: format!("AlmaLinux {}", version),
+            id: format!("alma-{}", version),
+            base_url: format!("https://repo.almalinux.org/almalinux/{}/BaseOS/x86_64/os/images/pxeboot", version),
+            archive_filename: "initrd.img".to_string(),
+            boot_file_bios: "pxelinux.0".to_string(),
+            boot_file_efi: "grubx64.efi".to_string(),
+            arch: NetbootArch::Amd64,
+        }
+    }
+
+    // Convenience aliases for specific versions
+    pub fn ubuntu_24_04() -> NetbootConfig { Self::ubuntu("24.04", "Noble Numbat") }
+    pub fn debian_12() -> NetbootConfig { Self::debian("12", "bookworm") }
+    pub fn rocky_9() -> NetbootConfig { Self::rocky("9") }
+    pub fn rocky_10() -> NetbootConfig { Self::rocky("10") }
+    pub fn alma_9() -> NetbootConfig { Self::alma("9") }
+    pub fn alma_10() -> NetbootConfig { Self::alma("10") }
+
     /// Get configuration by ID.
     pub fn get(id: &str) -> Option<NetbootConfig> {
-        match id {
-            "ubuntu-24.04" | "ubuntu" => Some(Self::ubuntu_24_04()),
-            "rocky-9" => Some(Self::rocky_9()),
-            "rocky-10" | "rocky" => Some(Self::rocky_10()),
-            "alma-9" => Some(Self::alma_9()),
-            "alma-10" | "alma" => Some(Self::alma_10()),
-            "debian-12" | "debian" => Some(Self::debian_12()),
-            _ => None,
+        // Check Ubuntu versions
+        for (version, codename) in UBUNTU_VERSIONS {
+            if id == format!("ubuntu-{}", version) {
+                return Some(Self::ubuntu(version, codename));
+            }
         }
+        if id == "ubuntu" {
+            if let Some((v, c)) = UBUNTU_VERSIONS.last() {
+                return Some(Self::ubuntu(v, c));
+            }
+        }
+
+        // Check Debian versions
+        for (version, codename) in DEBIAN_VERSIONS {
+            if id == format!("debian-{}", version) {
+                return Some(Self::debian(version, codename));
+            }
+        }
+        if id == "debian" {
+            if let Some((v, c)) = DEBIAN_VERSIONS.last() {
+                return Some(Self::debian(v, c));
+            }
+        }
+
+        // Check Rocky versions
+        for version in ROCKY_VERSIONS {
+            if id == format!("rocky-{}", version) {
+                return Some(Self::rocky(version));
+            }
+        }
+        if id == "rocky" {
+            if let Some(v) = ROCKY_VERSIONS.last() {
+                return Some(Self::rocky(v));
+            }
+        }
+
+        // Check Alma versions
+        for version in ALMA_VERSIONS {
+            if id == format!("alma-{}", version) {
+                return Some(Self::alma(version));
+            }
+        }
+        if id == "alma" {
+            if let Some(v) = ALMA_VERSIONS.last() {
+                return Some(Self::alma(v));
+            }
+        }
+
+        None
     }
 
     /// List all available configurations.
     pub fn list() -> Vec<NetbootConfig> {
-        vec![
-            Self::ubuntu_24_04(),
-            Self::debian_12(),
-            Self::rocky_9(),
-            Self::rocky_10(),
-            Self::alma_9(),
-            Self::alma_10(),
-        ]
+        let mut configs = Vec::new();
+        for (v, c) in UBUNTU_VERSIONS { configs.push(Self::ubuntu(v, c)); }
+        for (v, c) in DEBIAN_VERSIONS { configs.push(Self::debian(v, c)); }
+        for v in ROCKY_VERSIONS { configs.push(Self::rocky(v)); }
+        for v in ALMA_VERSIONS { configs.push(Self::alma(v)); }
+        configs
     }
 
     /// List available configuration IDs.
-    pub fn available_ids() -> Vec<&'static str> {
-        vec![
-            "ubuntu-24.04",
-            "debian-12",
-            "rocky-9",
-            "rocky-10",
-            "alma-9",
-            "alma-10",
-        ]
+    pub fn available_ids() -> Vec<String> {
+        let mut ids = Vec::new();
+        for (v, _) in UBUNTU_VERSIONS { ids.push(format!("ubuntu-{}", v)); }
+        for (v, _) in DEBIAN_VERSIONS { ids.push(format!("debian-{}", v)); }
+        for v in ROCKY_VERSIONS { ids.push(format!("rocky-{}", v)); }
+        for v in ALMA_VERSIONS { ids.push(format!("alma-{}", v)); }
+        ids
     }
 }
 
@@ -275,12 +323,12 @@ mod tests {
     fn test_available_ids() {
         let ids = NetbootConfigs::available_ids();
         assert_eq!(ids.len(), 6);
-        assert!(ids.contains(&"ubuntu-24.04"));
-        assert!(ids.contains(&"debian-12"));
-        assert!(ids.contains(&"rocky-9"));
-        assert!(ids.contains(&"rocky-10"));
-        assert!(ids.contains(&"alma-9"));
-        assert!(ids.contains(&"alma-10"));
+        assert!(ids.iter().any(|id| id == "ubuntu-24.04"));
+        assert!(ids.iter().any(|id| id == "debian-12"));
+        assert!(ids.iter().any(|id| id == "rocky-9"));
+        assert!(ids.iter().any(|id| id == "rocky-10"));
+        assert!(ids.iter().any(|id| id == "alma-9"));
+        assert!(ids.iter().any(|id| id == "alma-10"));
     }
 
     #[test]
