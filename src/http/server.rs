@@ -1,8 +1,9 @@
-//! HTTP server for serving cloud-init user-data and meta-data.
+//! HTTP server for serving cloud-init user-data, meta-data, and boot files.
 //!
-//! Serves NoCloud datasource files for Ubuntu autoinstall.
+//! Serves NoCloud datasource files for Ubuntu autoinstall, and optionally
+//! serves boot files (kernel, initrd) for faster transfers than TFTP.
 
-use std::fs;
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -14,10 +15,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{debug, error, info, warn};
 
-/// Cloud-init HTTP server for serving autoinstall data.
+/// Cloud-init HTTP server for serving autoinstall data and boot files.
 pub struct CloudInitServer {
     /// Directory containing user-data and meta-data files.
     data_dir: PathBuf,
+    /// Optional directory for serving boot files (kernel, initrd).
+    boot_dir: Option<PathBuf>,
     /// Bind address for HTTP server.
     bind_addr: SocketAddr,
     /// Running flag.
@@ -33,11 +36,18 @@ impl CloudInitServer {
     pub fn new<P: AsRef<Path>>(data_dir: P, bind_addr: SocketAddr) -> Self {
         Self {
             data_dir: data_dir.as_ref().to_path_buf(),
+            boot_dir: None,
             bind_addr,
             running: Arc::new(AtomicBool::new(false)),
             user_data: None,
             meta_data: None,
         }
+    }
+
+    /// Set directory for serving boot files (kernel, initrd).
+    pub fn with_boot_dir<P: AsRef<Path>>(mut self, boot_dir: P) -> Self {
+        self.boot_dir = Some(boot_dir.as_ref().to_path_buf());
+        self
     }
 
     /// Set user-data content directly.
@@ -114,7 +124,7 @@ impl CloudInitServer {
     /// Handle an incoming HTTP connection.
     fn handle_connection(&self, mut stream: TcpStream, addr: SocketAddr) -> Result<()> {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(30)))?; // Longer timeout for large files
 
         let mut buffer = [0u8; 4096];
         let bytes_read = stream.read(&mut buffer)?;
@@ -127,6 +137,17 @@ impl CloudInitServer {
         let (method, path) = self.parse_request(&request);
 
         info!("HTTP {} {} from {}", method, path, addr);
+
+        // Handle boot file requests separately (binary data)
+        if method == "GET" && self.boot_dir.is_some() {
+            if let Some(response) = self.try_serve_boot_file(&path, &mut stream) {
+                if !response {
+                    // File not found or error, fall through to text responses
+                } else {
+                    return Ok(());
+                }
+            }
+        }
 
         let response = match (method.as_str(), path.as_str()) {
             ("GET", "/user-data") | ("GET", "/user-data/") => {
@@ -203,6 +224,91 @@ impl CloudInitServer {
     fn serve_not_found(&self, path: &str) -> String {
         let content = format!("Not Found: {}\n", path);
         self.http_response(404, "text/plain", &content)
+    }
+
+    /// Try to serve a boot file directly to the stream.
+    /// Returns Some(true) if file was served, Some(false) if not found, None if boot_dir not set.
+    fn try_serve_boot_file(&self, path: &str, stream: &mut TcpStream) -> Option<bool> {
+        let boot_dir = self.boot_dir.as_ref()?;
+
+        // Sanitize path - prevent directory traversal
+        let clean_path = path.trim_start_matches('/');
+        if clean_path.is_empty() || clean_path.contains("..") {
+            return Some(false);
+        }
+
+        let file_path = boot_dir.join(clean_path);
+
+        // Check if file exists and is within boot_dir
+        if !file_path.starts_with(boot_dir) || !file_path.is_file() {
+            return Some(false);
+        }
+
+        match File::open(&file_path) {
+            Ok(mut file) => {
+                // Get file size for Content-Length
+                let metadata = match file.metadata() {
+                    Ok(m) => m,
+                    Err(_) => return Some(false),
+                };
+                let file_size = metadata.len();
+
+                info!("HTTP: Serving boot file {} ({} bytes)", clean_path, file_size);
+
+                // Determine content type
+                let content_type = if clean_path.ends_with(".efi") {
+                    "application/efi"
+                } else if clean_path.ends_with(".cfg") || clean_path.ends_with(".conf") {
+                    "text/plain"
+                } else {
+                    "application/octet-stream"
+                };
+
+                // Build and send response header
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: {}\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n",
+                    content_type,
+                    file_size
+                );
+
+                if let Err(e) = stream.write_all(header.as_bytes()) {
+                    error!("Failed to write HTTP header: {}", e);
+                    return Some(true); // We tried, connection is broken
+                }
+
+                // Stream file content in chunks
+                let mut buffer = [0u8; 65536]; // 64KB chunks
+                let mut total_sent = 0u64;
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            if let Err(e) = stream.write_all(&buffer[..n]) {
+                                error!("Failed to write boot file data: {}", e);
+                                return Some(true);
+                            }
+                            total_sent += n as u64;
+                        }
+                        Err(e) => {
+                            error!("Failed to read boot file {}: {}", clean_path, e);
+                            return Some(true);
+                        }
+                    }
+                }
+
+                if let Err(e) = stream.flush() {
+                    error!("Failed to flush stream: {}", e);
+                }
+
+                info!("HTTP: Transfer complete: {} ({} bytes)", clean_path, total_sent);
+                Some(true)
+            }
+            Err(_) => Some(false),
+        }
     }
 
     /// Build HTTP response.
