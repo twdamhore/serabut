@@ -333,7 +333,7 @@ impl NetbootManager {
 
     /// List important boot files for logging.
     fn list_boot_files(&self) -> Result<()> {
-        info!("Boot files available:");
+        info!("Boot files available in {}:", self.tftp_root.display());
 
         let important_files = [
             "pxelinux.0",
@@ -347,11 +347,17 @@ impl NetbootManager {
             "initrd",
         ];
 
+        let mut found_any = false;
         for filename in important_files {
             let path = self.tftp_root.join(filename);
             if path.exists() {
                 info!("  - {}", filename);
+                found_any = true;
             }
+        }
+
+        if !found_any {
+            warn!("No boot files found in root! Checking subdirectories...");
         }
 
         // Also check subdirectories
@@ -453,8 +459,8 @@ mod tests {
     fn test_config_boot_files() {
         let config = NetbootConfigs::ubuntu_24_04();
         let manager = NetbootManager::new("/tmp/test", config);
-        assert_eq!(manager.config().boot_file_bios, "pxelinux.0");
-        assert_eq!(manager.config().boot_file_efi, "grubnetx64.efi.signed");
+        assert_eq!(manager.config().boot_file_bios, "amd64/pxelinux.0");
+        assert_eq!(manager.config().boot_file_efi, "amd64/grubx64.efi");
     }
 
     #[test]

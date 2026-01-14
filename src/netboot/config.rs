@@ -70,8 +70,8 @@ impl NetbootConfigs {
             archive_filename: "ubuntu-24.04.3-netboot-amd64.tar.gz".to_string(),
             sha256sums_filename: Some("SHA256SUMS".to_string()),
             expected_sha256: None,
-            boot_file_bios: "pxelinux.0".to_string(),
-            boot_file_efi: "grubnetx64.efi.signed".to_string(),
+            boot_file_bios: "amd64/pxelinux.0".to_string(),
+            boot_file_efi: "amd64/grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
         }
     }
@@ -201,8 +201,8 @@ mod tests {
         assert_eq!(config.name, "Ubuntu 24.04 LTS (Noble Numbat)");
         assert!(config.archive_url().contains("ubuntu-24.04"));
         assert!(config.sha256sums_url().is_some());
-        assert_eq!(config.boot_file_bios, "pxelinux.0");
-        assert_eq!(config.boot_file_efi, "grubnetx64.efi.signed");
+        assert_eq!(config.boot_file_bios, "amd64/pxelinux.0");
+        assert_eq!(config.boot_file_efi, "amd64/grubx64.efi");
         assert_eq!(config.arch, NetbootArch::Amd64);
     }
 
