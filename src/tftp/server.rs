@@ -203,7 +203,11 @@ impl TftpServer {
             }
         };
 
-        info!("TFTP: {} requesting {}", client_addr, clean_filename);
+        if options.is_empty() {
+            info!("TFTP: {} requesting {} (no options, using 512-byte blocks)", client_addr, clean_filename);
+        } else {
+            info!("TFTP: {} requesting {} (options: {:?})", client_addr, clean_filename, options);
+        }
 
         // Open the file
         let mut file = match File::open(&file_path) {
