@@ -93,20 +93,26 @@ impl BootloaderConfigGenerator {
 
     /// Generate GRUB configuration for UEFI boot.
     pub fn generate_grub_config(&self) -> Result<()> {
-        let grub_dir = self.tftp_root.join("grub");
-        if !grub_dir.exists() {
-            fs::create_dir_all(&grub_dir)
-                .context("Failed to create grub directory")?;
-        }
-
-        let grub_cfg_path = grub_dir.join("grub.cfg");
         let config = self.grub_config_content();
 
-        let mut file = fs::File::create(&grub_cfg_path)
-            .with_context(|| format!("Failed to create {:?}", grub_cfg_path))?;
-        file.write_all(config.as_bytes())?;
+        // Write to multiple locations to ensure GRUB finds our config
+        // Ubuntu's GRUB looks in amd64/grub/, generic GRUB looks in grub/
+        let locations = [
+            self.tftp_root.join("grub"),
+            self.tftp_root.join("amd64").join("grub"),
+        ];
 
-        info!("Generated GRUB config: {:?}", grub_cfg_path);
+        for grub_dir in &locations {
+            if grub_dir.exists() || fs::create_dir_all(grub_dir).is_ok() {
+                let grub_cfg_path = grub_dir.join("grub.cfg");
+                if let Ok(mut file) = fs::File::create(&grub_cfg_path) {
+                    if file.write_all(config.as_bytes()).is_ok() {
+                        info!("Generated GRUB config: {:?}", grub_cfg_path);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -161,7 +167,7 @@ impl BootloaderConfigGenerator {
 
 # Boot menu settings
 set default=0
-set timeout=10
+set timeout=0
 
 # Main install option (default)
 menuentry "Ubuntu Server{autoinstall_label}" {{
@@ -334,7 +340,7 @@ mod tests {
     fn test_grub_config_contains_timeout() {
         let gen = BootloaderConfigGenerator::new("/tmp/tftp");
         let content = gen.grub_config_content();
-        assert!(content.contains("set timeout=10"));
+        assert!(content.contains("set timeout=0"));
     }
 
     #[test]
