@@ -235,20 +235,31 @@ fn main() {
         // Create autoinstall config
         let autoinstall_config = AutoinstallConfig::new(&autoinstall_url);
 
-        // Generate bootloader configs with autoinstall parameters
+        // HTTP boot URL for kernel/initrd (same server, much faster than TFTP)
+        let http_boot_url = format!("http://{}:{}", server_ip, args.http_port);
+        info!("HTTP boot URL for kernel/initrd: {}", http_boot_url);
+
+        // Generate bootloader configs with autoinstall parameters and HTTP boot
         if let Some(ref root) = tftp_root {
             let generator = BootloaderConfigGenerator::new(root)
-                .with_autoinstall(autoinstall_config);
+                .with_autoinstall(autoinstall_config)
+                .with_http_boot(&http_boot_url);
 
             if let Err(e) = generator.generate() {
                 warn!("Failed to generate bootloader configs: {}", e);
             } else {
-                info!("Generated bootloader configs with autoinstall parameters");
+                info!("Generated bootloader configs with HTTP boot for kernel/initrd");
             }
         }
 
-        // Create HTTP server
+        // Create HTTP server with boot file serving
         let mut http_server = CloudInitServer::new(&cloud_init_dir, http_addr);
+
+        // Add boot directory for serving kernel/initrd via HTTP
+        if let Some(ref root) = tftp_root {
+            http_server = http_server.with_boot_dir(root);
+            info!("HTTP server will serve boot files from: {}", root.display());
+        }
 
         // Load user-data if provided
         if let Some(ref user_data_path) = args.user_data {
