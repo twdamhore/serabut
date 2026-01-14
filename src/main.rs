@@ -212,8 +212,8 @@ fn main() {
     info!("BIOS boot file: {}", boot_file_bios);
     info!("EFI boot file: {}", boot_file_efi);
 
-    // Step 2: Set up autoinstall if enabled
-    let http_handle = if args.autoinstall && !args.monitor_only {
+    // Step 2: Set up autoinstall if enabled (skip if already interrupted)
+    let http_handle = if args.autoinstall && !args.monitor_only && running.load(Ordering::SeqCst) {
         info!("=== Configuring autoinstall ===");
 
         // Build HTTP server URL
@@ -294,9 +294,9 @@ fn main() {
         None
     };
 
-    // Step 3: Start TFTP server (unless monitor-only)
+    // Step 3: Start TFTP server (unless monitor-only or already interrupted)
     #[allow(clippy::manual_map)]
-    let tftp_handle = if !args.monitor_only {
+    let tftp_handle = if !args.monitor_only && running.load(Ordering::SeqCst) {
         if let Some(ref root) = tftp_root {
             let tftp_addr = SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::UNSPECIFIED,
@@ -331,8 +331,8 @@ fn main() {
         None
     };
 
-    // Step 4: Start proxyDHCP server (unless monitor-only)
-    let proxydhcp_handle = if !args.monitor_only && server_ip != Ipv4Addr::UNSPECIFIED {
+    // Step 4: Start proxyDHCP server (unless monitor-only or already interrupted)
+    let proxydhcp_handle = if !args.monitor_only && server_ip != Ipv4Addr::UNSPECIFIED && running.load(Ordering::SeqCst) {
         let proxy_server = ProxyDhcpServer::new(
             server_ip,
             boot_file_bios.clone(),
@@ -366,7 +366,13 @@ fn main() {
         None
     };
 
-    // Step 5: Start PXE monitor
+    // Step 5: Start PXE monitor (skip if already interrupted)
+    if !running.load(Ordering::SeqCst) {
+        info!("Shutdown requested, skipping PXE monitor");
+        info!("Shutdown complete");
+        return;
+    }
+
     info!("=== Starting PXE boot monitor ===");
 
     // Create the capture backend
