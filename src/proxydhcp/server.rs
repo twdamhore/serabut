@@ -39,6 +39,8 @@ const DHCP_MAGIC_COOKIE: [u8; 4] = [99, 130, 83, 99];
 pub struct ProxyDhcpServer {
     /// Our server IP address.
     server_ip: Ipv4Addr,
+    /// Network interface name (for SO_BINDTODEVICE).
+    interface: Option<String>,
     /// BIOS boot filename.
     boot_file_bios: String,
     /// EFI boot filename.
@@ -61,10 +63,17 @@ impl ProxyDhcpServer {
     ) -> Self {
         Self {
             server_ip,
+            interface: None,
             boot_file_bios: boot_file_bios.into(),
             boot_file_efi: boot_file_efi.into(),
             running: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Set network interface for socket binding (important for WiFi).
+    pub fn with_interface(mut self, interface: impl Into<String>) -> Self {
+        self.interface = Some(interface.into());
+        self
     }
 
     /// Get a handle to stop the server.
@@ -120,6 +129,28 @@ impl ProxyDhcpServer {
 
         socket.set_reuse_address(true)?;
         socket.set_broadcast(true)?;
+
+        // Bind to specific interface if specified (important for WiFi)
+        #[cfg(target_os = "linux")]
+        if let Some(ref iface) = self.interface {
+            use std::os::unix::io::AsRawFd;
+            let fd = socket.as_raw_fd();
+            let iface_bytes = iface.as_bytes();
+            let result = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BINDTODEVICE,
+                    iface_bytes.as_ptr() as *const libc::c_void,
+                    iface_bytes.len() as libc::socklen_t,
+                )
+            };
+            if result != 0 {
+                let err = std::io::Error::last_os_error();
+                anyhow::bail!("Failed to bind to interface {}: {}", iface, err);
+            }
+            info!("Bound socket to interface: {}", iface);
+        }
 
         let addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port);
         socket.bind(&addr.into())

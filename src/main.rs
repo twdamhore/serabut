@@ -326,7 +326,8 @@ fn main() {
             server_ip,
             boot_file_bios.clone(),
             boot_file_efi.clone(),
-        );
+        )
+        .with_interface(args.interface.as_ref().unwrap());
         let proxy_running = proxy_server.running_flag();
         let global_running = running.clone();
 
