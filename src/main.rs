@@ -174,7 +174,7 @@ fn main() {
     };
 
     // Step 1: Download/verify netboot image (unless skipped or monitor-only)
-    let (tftp_root, boot_file_bios, boot_file_efi) = if !args.skip_download && !args.monitor_only {
+    let (tftp_root, boot_file_bios, boot_file_efi, iso_url) = if !args.skip_download && !args.monitor_only {
         info!("=== Preparing {} netboot image ===", netboot_config.name);
 
         let manager = NetbootManager::new(&args.data_dir, netboot_config.clone());
@@ -183,7 +183,9 @@ fn main() {
                 info!("Netboot files ready at: {}", root.display());
                 let bios = manager.config().boot_file_bios.clone();
                 let efi = manager.config().boot_file_efi.clone();
-                (Some(root), bios, efi)
+                // Discover ISO URL for kernel parameter
+                let iso = manager.discover_iso_url().ok();
+                (Some(root), bios, efi, iso)
             }
             Err(e) => {
                 error!("Failed to prepare netboot image: {}", e);
@@ -203,10 +205,13 @@ fn main() {
         info!("Using existing netboot files at: {}", tftp_root.display());
         // Use boot files from config, but also check what's available
         let (bios, efi) = detect_boot_files(&tftp_root);
-        (Some(tftp_root), bios, efi)
+        // Discover ISO URL
+        let manager = NetbootManager::new(&args.data_dir, netboot_config.clone());
+        let iso = manager.discover_iso_url().ok();
+        (Some(tftp_root), bios, efi, iso)
     } else {
         // Monitor only mode
-        (None, netboot_config.boot_file_bios.clone(), netboot_config.boot_file_efi.clone())
+        (None, netboot_config.boot_file_bios.clone(), netboot_config.boot_file_efi.clone(), None)
     };
 
     info!("BIOS boot file: {}", boot_file_bios);
@@ -241,9 +246,15 @@ fn main() {
 
         // Generate bootloader configs with autoinstall parameters and HTTP boot
         if let Some(ref root) = tftp_root {
-            let generator = BootloaderConfigGenerator::new(root)
+            let mut generator = BootloaderConfigGenerator::new(root)
                 .with_autoinstall(autoinstall_config)
                 .with_http_boot(&http_boot_url);
+
+            // Add ISO URL if discovered
+            if let Some(ref url) = iso_url {
+                info!("ISO URL for installer: {}", url);
+                generator = generator.with_iso_url(url);
+            }
 
             if let Err(e) = generator.generate() {
                 warn!("Failed to generate bootloader configs: {}", e);

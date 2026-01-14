@@ -85,6 +85,34 @@ impl NetbootManager {
         Ok(self.tftp_root.clone())
     }
 
+    /// Discover the Ubuntu live server ISO URL from the releases page.
+    pub fn discover_iso_url(&self) -> Result<String> {
+        let base_url = &self.config.base_url;
+        info!("Discovering ISO URL from {} ...", base_url);
+
+        let response = reqwest::blocking::get(base_url)
+            .context("Failed to fetch releases page")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to fetch releases page: HTTP {}", response.status()));
+        }
+
+        let body = response.text().context("Failed to read releases page")?;
+
+        // Look for ubuntu-24.04.X-live-server-amd64.iso pattern
+        let pattern = r#"href="(ubuntu-\d+\.\d+(?:\.\d+)?-live-server-amd64\.iso)""#;
+        let re = Regex::new(pattern).context("Failed to compile regex")?;
+
+        if let Some(captures) = re.captures(&body) {
+            let filename = captures.get(1).unwrap().as_str();
+            let url = format!("{}/{}", base_url, filename);
+            info!("Found ISO: {}", filename);
+            return Ok(url);
+        }
+
+        Err(anyhow!("Could not find live server ISO on releases page"))
+    }
+
     /// Discover the latest Ubuntu netboot filename from the releases page.
     fn discover_ubuntu_netboot(&self) -> Result<(String, String)> {
         let base_url = &self.config.base_url;
