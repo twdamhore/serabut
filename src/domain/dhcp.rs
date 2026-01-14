@@ -9,15 +9,16 @@ use macaddr::MacAddr6;
 
 /// DHCP message types as defined in RFC 2131.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DhcpMessageType {
-    Discover,
-    Offer,
-    Request,
-    Decline,
-    Ack,
-    Nak,
-    Release,
-    Inform,
+    Discover = 1,
+    Offer = 2,
+    Request = 3,
+    Decline = 4,
+    Ack = 5,
+    Nak = 6,
+    Release = 7,
+    Inform = 8,
 }
 
 impl DhcpMessageType {
