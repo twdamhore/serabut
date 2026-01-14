@@ -172,6 +172,7 @@ impl NetbootManager {
     }
 
     /// Discover ISO filename and SHA256 checksum from Ubuntu SHA256SUMS file.
+    /// Returns the latest version available.
     fn discover_iso_sha256(&self) -> Result<(String, String)> {
         let sha256sums_url = format!("{}/SHA256SUMS", self.config.base_url);
         info!("Fetching SHA256SUMS from {} ...", sha256sums_url);
@@ -185,21 +186,32 @@ impl NetbootManager {
 
         let body = response.text().context("Failed to read SHA256SUMS")?;
 
-        // Look for live-server ISO line
+        // Look for live-server ISO lines
         // Format: <sha256>  <filename> or <sha256> *<filename>
         let pattern = r"^([a-f0-9]{64})\s+\*?(ubuntu-[\d.]+(?:\.\d+)?-live-server-amd64\.iso)\s*$";
         let re = Regex::new(pattern).context("Failed to compile regex")?;
 
+        // Collect all matching ISOs and pick the latest version
+        let mut matches: Vec<(String, String)> = Vec::new();
         for line in body.lines() {
             if let Some(captures) = re.captures(line) {
                 let sha256 = captures.get(1).unwrap().as_str().to_string();
                 let filename = captures.get(2).unwrap().as_str().to_string();
-                info!("Found ISO: {} (sha256: {}...)", filename, &sha256[..16]);
-                return Ok((filename, sha256));
+                matches.push((filename, sha256));
             }
         }
 
-        Err(anyhow!("Could not find live server ISO in SHA256SUMS"))
+        if matches.is_empty() {
+            return Err(anyhow!("Could not find live server ISO in SHA256SUMS"));
+        }
+
+        // Sort by filename (version) descending - latest version will be last alphabetically
+        // e.g., ubuntu-24.04.3 > ubuntu-24.04.2
+        matches.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let (filename, sha256) = matches.into_iter().next().unwrap();
+        info!("Found ISO: {} (sha256: {}...)", filename, &sha256[..16]);
+        Ok((filename, sha256))
     }
 
     /// Compute SHA256 checksum of a file.
