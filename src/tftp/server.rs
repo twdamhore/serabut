@@ -189,7 +189,14 @@ impl TftpServer {
                 return Ok(());
             }
             Err(_) => {
-                warn!("TFTP: File not found: {} (looked in {})", filename, root.join(&clean_filename).display());
+                // Known optional files (GRUB module lists) - log at debug level
+                let is_optional = clean_filename.ends_with(".lst")
+                    || clean_filename.contains("x86_64-efi/");
+                if is_optional {
+                    debug!("TFTP: Optional file not found: {}", filename);
+                } else {
+                    warn!("TFTP: File not found: {} (looked in {})", filename, root.join(&clean_filename).display());
+                }
                 let socket = UdpSocket::bind("0.0.0.0:0")?;
                 Self::send_error_static(&socket, client_addr, ERROR_FILE_NOT_FOUND, "File not found");
                 return Ok(());
