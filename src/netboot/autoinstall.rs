@@ -59,6 +59,8 @@ pub struct BootloaderConfigGenerator {
     autoinstall: Option<AutoinstallConfig>,
     /// HTTP server URL for serving kernel/initrd (faster than TFTP).
     http_boot_url: Option<String>,
+    /// ISO URL for the installer to download.
+    iso_url: Option<String>,
 }
 
 impl BootloaderConfigGenerator {
@@ -68,6 +70,7 @@ impl BootloaderConfigGenerator {
             tftp_root: tftp_root.as_ref().to_path_buf(),
             autoinstall: None,
             http_boot_url: None,
+            iso_url: None,
         }
     }
 
@@ -81,6 +84,13 @@ impl BootloaderConfigGenerator {
     /// Format: "http://ip:port" (e.g., "http://192.168.1.100:8080")
     pub fn with_http_boot(mut self, url: impl Into<String>) -> Self {
         self.http_boot_url = Some(url.into());
+        self
+    }
+
+    /// Set ISO URL for the installer to download.
+    /// Example: "https://releases.ubuntu.com/24.04/ubuntu-24.04.3-live-server-amd64.iso"
+    pub fn with_iso_url(mut self, url: impl Into<String>) -> Self {
+        self.iso_url = Some(url.into());
         self
     }
 
@@ -137,10 +147,17 @@ impl BootloaderConfigGenerator {
 
     /// Generate GRUB configuration content.
     fn grub_config_content(&self) -> String {
-        let extra_params = self.autoinstall
-            .as_ref()
-            .map(|a| format!(" {}", a.kernel_params()))
-            .unwrap_or_default();
+        let mut extra_params = String::new();
+
+        // Add ISO URL if specified
+        if let Some(ref url) = self.iso_url {
+            extra_params.push_str(&format!(" url={}", url));
+        }
+
+        // Add autoinstall parameters
+        if let Some(ref autoinstall) = self.autoinstall {
+            extra_params.push_str(&format!(" {}", autoinstall.kernel_params()));
+        }
 
         // Use HTTP for kernel/initrd if configured (much faster than TFTP)
         let (linux_path, initrd_path) = if let Some(ref url) = self.http_boot_url {
