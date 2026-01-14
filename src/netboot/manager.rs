@@ -333,7 +333,7 @@ impl NetbootManager {
 
     /// List important boot files for logging.
     fn list_boot_files(&self) -> Result<()> {
-        info!("Boot files available:");
+        info!("Boot files available in {}:", self.tftp_root.display());
 
         let important_files = [
             "pxelinux.0",
@@ -347,11 +347,17 @@ impl NetbootManager {
             "initrd",
         ];
 
+        let mut found_any = false;
         for filename in important_files {
             let path = self.tftp_root.join(filename);
             if path.exists() {
                 info!("  - {}", filename);
+                found_any = true;
             }
+        }
+
+        if !found_any {
+            warn!("No boot files found in root! Checking subdirectories...");
         }
 
         // Also check subdirectories

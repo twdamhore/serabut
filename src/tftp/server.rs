@@ -182,8 +182,14 @@ impl TftpServer {
 
         let file_path = match canonical {
             Ok(path) if path.starts_with(&root_canonical) => path,
-            _ => {
-                warn!("TFTP: File not found or access denied: {}", filename);
+            Ok(path) => {
+                warn!("TFTP: Access denied (outside root): {} -> {}", filename, path.display());
+                let socket = UdpSocket::bind("0.0.0.0:0")?;
+                Self::send_error_static(&socket, client_addr, ERROR_FILE_NOT_FOUND, "File not found");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("TFTP: File not found: {} (looked in {})", filename, root.join(&clean_filename).display());
                 let socket = UdpSocket::bind("0.0.0.0:0")?;
                 Self::send_error_static(&socket, client_addr, ERROR_FILE_NOT_FOUND, "File not found");
                 return Ok(());
