@@ -1,7 +1,8 @@
 //! TFTP server implementation.
 //!
 //! A simple TFTP server for serving PXE boot files.
-//! Implements RFC 1350 (TFTP) with RFC 2347 (options) support.
+//! Implements RFC 1350 (TFTP) with RFC 2347 (options), RFC 2348 (blksize),
+//! and RFC 7440 (windowsize) support.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -35,6 +36,13 @@ const DEFAULT_BLOCK_SIZE: usize = 512;
 
 /// Maximum block size (RFC 2348)
 const MAX_BLOCK_SIZE: usize = 65464;
+
+/// Default window size (RFC 7440)
+const DEFAULT_WINDOW_SIZE: u16 = 1;
+
+/// Maximum window size (RFC 7440 recommends not exceeding 65535)
+/// We use 64 as a reasonable max to avoid flooding the network
+const MAX_WINDOW_SIZE: u16 = 64;
 
 /// TFTP server for serving boot files.
 pub struct TftpServer {
@@ -229,13 +237,22 @@ impl TftpServer {
         const OPTIMAL_BLOCK_SIZE: usize = 1468;
 
         let mut block_size = DEFAULT_BLOCK_SIZE;
+        let mut window_size = DEFAULT_WINDOW_SIZE;
         let mut tsize_requested = false;
         let mut blksize_requested = false;
+        let mut windowsize_requested = false;
 
         if let Some(blksize_str) = options.get("blksize") {
             if let Ok(requested) = blksize_str.parse::<usize>() {
                 block_size = requested.min(MAX_BLOCK_SIZE).max(8);
                 blksize_requested = true;
+            }
+        }
+
+        if let Some(windowsize_str) = options.get("windowsize") {
+            if let Ok(requested) = windowsize_str.parse::<u16>() {
+                window_size = requested.min(MAX_WINDOW_SIZE).max(1);
+                windowsize_requested = true;
             }
         }
 
@@ -256,7 +273,7 @@ impl TftpServer {
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
 
         // Send OACK if we have options to acknowledge
-        let has_options_to_ack = block_size != DEFAULT_BLOCK_SIZE || tsize_requested;
+        let has_options_to_ack = block_size != DEFAULT_BLOCK_SIZE || tsize_requested || windowsize_requested;
 
         if has_options_to_ack {
             let mut oack = vec![0u8, OPCODE_OACK as u8];
@@ -265,13 +282,24 @@ impl TftpServer {
                 oack.extend_from_slice(b"blksize\0");
                 oack.extend_from_slice(block_size.to_string().as_bytes());
                 oack.push(0);
-                info!("TFTP: Using block size {} for {}", block_size, clean_filename);
+            }
+
+            if windowsize_requested {
+                oack.extend_from_slice(b"windowsize\0");
+                oack.extend_from_slice(window_size.to_string().as_bytes());
+                oack.push(0);
             }
 
             if tsize_requested {
                 oack.extend_from_slice(b"tsize\0");
                 oack.extend_from_slice(file_size.to_string().as_bytes());
                 oack.push(0);
+            }
+
+            if windowsize_requested && window_size > 1 {
+                info!("TFTP: Using blksize={}, windowsize={} for {}", block_size, window_size, clean_filename);
+            } else if block_size != DEFAULT_BLOCK_SIZE {
+                info!("TFTP: Using blksize={} for {}", block_size, clean_filename);
             }
 
             socket.send_to(&oack, client_addr)?;
@@ -291,25 +319,49 @@ impl TftpServer {
             }
         }
 
-        // Transfer the file
-        let mut block_num: u16 = 1;
+        // Transfer the file using windowed transfer (RFC 7440)
+        // With windowsize=1, this behaves like traditional TFTP
+        // With windowsize>1, we send multiple blocks before waiting for ACK
+        let mut next_block: u16 = 1;
         let mut buf = vec![0u8; block_size];
-        let mut total_sent = 0u64;
+        let mut eof_reached = false;
+        let mut last_block_sent: u16 = 0;
 
-        loop {
-            // Read a block
-            let bytes_read = file.read(&mut buf)?;
+        while !eof_reached || last_block_sent > 0 {
+            // Build window of blocks to send
+            let mut window: Vec<(u16, Vec<u8>, usize)> = Vec::new(); // (block_num, packet, data_len)
 
-            // Build DATA packet
-            let mut data_packet = Vec::with_capacity(4 + bytes_read);
-            data_packet.extend_from_slice(&OPCODE_DATA.to_be_bytes());
-            data_packet.extend_from_slice(&block_num.to_be_bytes());
-            data_packet.extend_from_slice(&buf[..bytes_read]);
+            while window.len() < window_size as usize && !eof_reached {
+                let bytes_read = file.read(&mut buf)?;
 
-            // Send with retries
+                let mut data_packet = Vec::with_capacity(4 + bytes_read);
+                data_packet.extend_from_slice(&OPCODE_DATA.to_be_bytes());
+                data_packet.extend_from_slice(&next_block.to_be_bytes());
+                data_packet.extend_from_slice(&buf[..bytes_read]);
+
+                window.push((next_block, data_packet, bytes_read));
+                last_block_sent = next_block;
+                next_block = next_block.wrapping_add(1);
+
+                if bytes_read < block_size {
+                    eof_reached = true;
+                    break;
+                }
+            }
+
+            if window.is_empty() {
+                break;
+            }
+
+            // Send window and wait for ACK with retries
             let mut retries = 0;
+            let expected_ack = window.last().map(|(b, _, _)| *b).unwrap_or(0);
+
             loop {
-                socket.send_to(&data_packet, client_addr)?;
+                // Send all blocks in window
+                for (_, packet, _) in &window {
+                    socket.send_to(packet, client_addr)?;
+                }
 
                 // Wait for ACK
                 let mut ack_buf = [0u8; 4];
@@ -318,15 +370,28 @@ impl TftpServer {
                         let opcode = u16::from_be_bytes([ack_buf[0], ack_buf[1]]);
                         let acked_block = u16::from_be_bytes([ack_buf[2], ack_buf[3]]);
 
-                        if opcode == OPCODE_ACK && acked_block == block_num {
-                            break; // Success
+                        if opcode == OPCODE_ACK {
+                            if acked_block == expected_ack {
+                                // Full window acknowledged
+                                break;
+                            } else {
+                                // Partial ACK - some blocks lost
+                                // Remove acknowledged blocks and resend rest
+                                window.retain(|(blk, _, _)| {
+                                    let diff = blk.wrapping_sub(acked_block);
+                                    diff > 0 && diff <= window_size
+                                });
+                                if window.is_empty() {
+                                    break;
+                                }
+                                retries = 0; // Reset on progress
+                                continue;
+                            }
                         } else if opcode == OPCODE_ERROR {
                             return Err(anyhow!("Client sent error"));
                         }
-                        // Duplicate ACK or wrong block, resend
                     }
                     Ok(_) => {
-                        // Short packet, ignore and wait for proper ACK
                         retries += 1;
                         if retries > 5 {
                             return Err(anyhow!("Transfer timeout after 5 retries"));
@@ -337,25 +402,25 @@ impl TftpServer {
                         if retries > 5 {
                             return Err(anyhow!("Transfer timeout after 5 retries"));
                         }
-                        debug!("TFTP: Retry {} for block {}", retries, block_num);
+                        debug!("TFTP: Retry {} for window blocks {}-{}", retries,
+                               window.first().map(|(b, _, _)| *b).unwrap_or(0),
+                               window.last().map(|(b, _, _)| *b).unwrap_or(0));
                     }
                     Err(e) => return Err(anyhow!("ACK receive error: {}", e)),
                 }
             }
 
-            total_sent += bytes_read as u64;
-
-            // Check if this was the last block
-            if bytes_read < block_size {
-                info!(
-                    "TFTP: Transfer complete: {} ({} bytes)",
-                    clean_filename, total_sent
-                );
+            // Window fully acknowledged, continue with next window
+            // If eof_reached and window is done, we're finished
+            if eof_reached {
                 break;
             }
-
-            block_num = block_num.wrapping_add(1);
         }
+
+        info!(
+            "TFTP: Transfer complete: {} ({} bytes)",
+            clean_filename, file_size
+        );
 
         Ok(())
     }
@@ -446,5 +511,15 @@ mod tests {
     fn test_error_code_constants() {
         assert_eq!(ERROR_FILE_NOT_FOUND, 1);
         assert_eq!(ERROR_ACCESS_VIOLATION, 2);
+    }
+
+    #[test]
+    fn test_default_window_size_constant() {
+        assert_eq!(DEFAULT_WINDOW_SIZE, 1);
+    }
+
+    #[test]
+    fn test_max_window_size_constant() {
+        assert_eq!(MAX_WINDOW_SIZE, 64);
     }
 }
