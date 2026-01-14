@@ -459,8 +459,8 @@ mod tests {
     fn test_config_boot_files() {
         let config = NetbootConfigs::ubuntu_24_04();
         let manager = NetbootManager::new("/tmp/test", config);
-        assert_eq!(manager.config().boot_file_bios, "pxelinux.0");
-        assert_eq!(manager.config().boot_file_efi, "grubnetx64.efi.signed");
+        assert_eq!(manager.config().boot_file_bios, "amd64/pxelinux.0");
+        assert_eq!(manager.config().boot_file_efi, "amd64/grubx64.efi");
     }
 
     #[test]
