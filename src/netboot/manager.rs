@@ -258,7 +258,41 @@ impl NetbootManager {
         }
 
         info!("Extraction complete");
+
+        // Create symlinks for GRUB to find its files at the expected paths
+        self.create_boot_symlinks()?;
+
         self.list_boot_files()?;
+
+        Ok(())
+    }
+
+    /// Create symlinks so boot loaders can find files at expected paths.
+    /// GRUB looks for /grub/ at TFTP root, but Ubuntu extracts to amd64/grub/
+    fn create_boot_symlinks(&self) -> Result<()> {
+        // Symlinks: (target_relative_path, link_name)
+        // These are relative symlinks so they work regardless of absolute path
+        let symlinks = [
+            ("amd64/grub", "grub"),
+            ("amd64/pxelinux.cfg", "pxelinux.cfg"),
+        ];
+
+        for (target, link_name) in symlinks {
+            let target_path = self.tftp_root.join(target);
+            let link_path = self.tftp_root.join(link_name);
+
+            if target_path.exists() && !link_path.exists() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+                    // Use relative path for the symlink target
+                    symlink(target, &link_path).with_context(|| {
+                        format!("Failed to create symlink {} -> {}", link_path.display(), target)
+                    })?;
+                    info!("Created symlink: {} -> {}", link_name, target);
+                }
+            }
+        }
 
         Ok(())
     }
