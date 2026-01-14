@@ -610,4 +610,65 @@ mod tests {
         assert_eq!(manager.config().boot_file_bios, "pxelinux.0");
         assert_eq!(manager.config().boot_file_efi, "grubx64.efi");
     }
+
+    #[test]
+    fn test_iso_dir() {
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/var/lib/serabut", config);
+        assert_eq!(manager.iso_dir(), Path::new("/var/lib/serabut/iso/ubuntu-24.04"));
+    }
+
+    #[test]
+    fn test_iso_dir_different_config() {
+        let config = NetbootConfigs::debian_12();
+        let manager = NetbootManager::new("/data", config);
+        assert_eq!(manager.iso_dir(), Path::new("/data/iso/debian-12"));
+    }
+
+    #[test]
+    fn test_compute_file_sha256() {
+        use std::io::Write;
+
+        // Create a temp file with known content
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_sha256.txt");
+        let mut file = std::fs::File::create(&test_file).unwrap();
+        file.write_all(b"hello world\n").unwrap();
+        drop(file);
+
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp", config);
+
+        let hash = manager.compute_file_sha256(&test_file).unwrap();
+        // SHA256 of "hello world\n"
+        assert_eq!(hash, "a948904f2f0f479b8f8197694b30184b0d2ed1c1cd2a1ec0fb85d299a192a447");
+
+        std::fs::remove_file(&test_file).ok();
+    }
+
+    #[test]
+    fn test_compute_file_sha256_empty_file() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join("test_sha256_empty.txt");
+        let file = std::fs::File::create(&test_file).unwrap();
+        drop(file);
+
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp", config);
+
+        let hash = manager.compute_file_sha256(&test_file).unwrap();
+        // SHA256 of empty file
+        assert_eq!(hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+
+        std::fs::remove_file(&test_file).ok();
+    }
+
+    #[test]
+    fn test_compute_file_sha256_nonexistent_file() {
+        let config = NetbootConfigs::ubuntu_24_04();
+        let manager = NetbootManager::new("/tmp", config);
+
+        let result = manager.compute_file_sha256(Path::new("/nonexistent/file.txt"));
+        assert!(result.is_err());
+    }
 }

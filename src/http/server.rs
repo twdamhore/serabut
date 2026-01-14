@@ -714,4 +714,53 @@ mod tests {
         assert!(response.contains("Content-Type: text/plain"));
         assert!(response.contains("vendor-data"));
     }
+
+    #[test]
+    fn test_with_iso_dir() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr)
+            .with_iso_dir("/var/lib/serabut/iso/ubuntu-24.04");
+        assert_eq!(server.iso_dir, Some(PathBuf::from("/var/lib/serabut/iso/ubuntu-24.04")));
+    }
+
+    #[test]
+    fn test_with_iso_dir_none_by_default() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+        assert_eq!(server.iso_dir, None);
+    }
+
+    #[test]
+    fn test_with_boot_dir_and_iso_dir() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr)
+            .with_boot_dir("/var/lib/serabut/tftp")
+            .with_iso_dir("/var/lib/serabut/iso/ubuntu-24.04");
+        assert_eq!(server.boot_dir, Some(PathBuf::from("/var/lib/serabut/tftp")));
+        assert_eq!(server.iso_dir, Some(PathBuf::from("/var/lib/serabut/iso/ubuntu-24.04")));
+    }
+
+    #[test]
+    fn test_try_serve_iso_file_no_iso_dir() {
+        let addr = SocketAddr::from((Ipv4Addr::new(0, 0, 0, 0), 8080));
+        let server = CloudInitServer::new("/tmp", addr);
+        // Cannot test with real TcpStream, but verify iso_dir is None
+        assert!(server.iso_dir.is_none());
+    }
+
+    #[test]
+    fn test_builder_chain_all_options() {
+        let addr = SocketAddr::from((Ipv4Addr::new(192, 168, 1, 1), 8080));
+        let server = CloudInitServer::new("/data", addr)
+            .with_boot_dir("/boot")
+            .with_iso_dir("/iso")
+            .with_user_data("user-data-content".to_string())
+            .with_meta_data("meta-data-content".to_string());
+
+        assert_eq!(server.data_dir, PathBuf::from("/data"));
+        assert_eq!(server.boot_dir, Some(PathBuf::from("/boot")));
+        assert_eq!(server.iso_dir, Some(PathBuf::from("/iso")));
+        assert_eq!(server.user_data, Some("user-data-content".to_string()));
+        assert_eq!(server.meta_data, Some("meta-data-content".to_string()));
+    }
 }
