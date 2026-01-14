@@ -49,6 +49,11 @@ impl AutoinstallConfig {
             self.datasource_url
         )
     }
+
+    /// Get the URL to user-data file.
+    pub fn user_data_url(&self) -> String {
+        format!("{}user-data", self.datasource_url)
+    }
 }
 
 /// Bootloader configuration generator.
@@ -152,14 +157,23 @@ impl BootloaderConfigGenerator {
         // Add ISO URL if specified
         if let Some(ref url) = self.iso_url {
             extra_params.push_str(&format!(" url={}", url));
-            // Prevent cloud-init from also downloading the ISO (it parses url= too)
-            // See: https://askubuntu.com/questions/1329734
-            extra_params.push_str(" cloud-config-url=/dev/null");
         }
 
         // Add autoinstall parameters
         if let Some(ref autoinstall) = self.autoinstall {
-            extra_params.push_str(&format!(" {}", autoinstall.kernel_params()));
+            if self.iso_url.is_some() {
+                // When using ISO URL, point cloud-config-url directly to user-data.
+                // This gives cloud-init its config and prevents it from parsing url=
+                // (which would cause triple ISO download - see askubuntu.com/questions/1329734)
+                extra_params.push_str(&format!(" cloud-config-url={}", autoinstall.user_data_url()));
+                extra_params.push_str(" autoinstall");
+            } else {
+                // Without ISO URL, use traditional nocloud-net datasource
+                extra_params.push_str(&format!(" {}", autoinstall.kernel_params()));
+            }
+        } else if self.iso_url.is_some() {
+            // ISO URL without autoinstall - still need to prevent cloud-init from parsing url=
+            extra_params.push_str(" cloud-config-url=/dev/null");
         }
 
         // Use HTTP for kernel/initrd if configured (much faster than TFTP)
@@ -357,6 +371,18 @@ mod tests {
     }
 
     #[test]
+    fn test_user_data_url() {
+        let config = AutoinstallConfig::new("http://192.168.1.100:8080/");
+        assert_eq!(config.user_data_url(), "http://192.168.1.100:8080/user-data");
+    }
+
+    #[test]
+    fn test_user_data_url_with_subpath() {
+        let config = AutoinstallConfig::new("http://10.0.0.1:3000/cloud-init/");
+        assert_eq!(config.user_data_url(), "http://10.0.0.1:3000/cloud-init/user-data");
+    }
+
+    #[test]
     fn test_grub_config_contains_timeout() {
         let gen = BootloaderConfigGenerator::new("/tmp/tftp");
         let content = gen.grub_config_content();
@@ -548,5 +574,43 @@ mod tests {
         assert!(content.contains("(http,192.168.1.100:8080)/linux"));
         assert!(content.contains("ds=nocloud-net"));
         assert!(content.contains("(Autoinstall)"));
+    }
+
+    #[test]
+    fn test_grub_config_with_iso_url_only() {
+        // ISO URL without autoinstall should use cloud-config-url=/dev/null
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp")
+            .with_iso_url("http://releases.ubuntu.com/24.04/ubuntu.iso");
+        let content = gen.grub_config_content();
+        assert!(content.contains("url=http://releases.ubuntu.com/24.04/ubuntu.iso"));
+        assert!(content.contains("cloud-config-url=/dev/null"));
+        assert!(!content.contains("ds=nocloud-net"));
+    }
+
+    #[test]
+    fn test_grub_config_with_iso_url_and_autoinstall() {
+        // ISO URL + autoinstall should use cloud-config-url pointing to user-data
+        let config = AutoinstallConfig::new("http://192.168.1.100:8080/");
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp")
+            .with_autoinstall(config)
+            .with_iso_url("http://releases.ubuntu.com/24.04/ubuntu.iso");
+        let content = gen.grub_config_content();
+        assert!(content.contains("url=http://releases.ubuntu.com/24.04/ubuntu.iso"));
+        assert!(content.contains("cloud-config-url=http://192.168.1.100:8080/user-data"));
+        assert!(content.contains("autoinstall"));
+        // Should NOT use ds=nocloud-net when cloud-config-url provides user-data
+        assert!(!content.contains("ds=nocloud-net"));
+    }
+
+    #[test]
+    fn test_grub_config_autoinstall_without_iso_uses_nocloud() {
+        // Autoinstall without ISO URL should use ds=nocloud-net datasource
+        let config = AutoinstallConfig::new("http://192.168.1.100:8080/");
+        let gen = BootloaderConfigGenerator::new("/tmp/tftp")
+            .with_autoinstall(config);
+        let content = gen.grub_config_content();
+        assert!(!content.contains("url="));
+        assert!(!content.contains("cloud-config-url="));
+        assert!(content.contains("ds=nocloud-net;s=http://192.168.1.100:8080/"));
     }
 }
