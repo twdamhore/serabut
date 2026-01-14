@@ -21,6 +21,8 @@ pub struct CloudInitServer {
     data_dir: PathBuf,
     /// Optional directory for serving boot files (kernel, initrd).
     boot_dir: Option<PathBuf>,
+    /// Optional directory for serving ISO files.
+    iso_dir: Option<PathBuf>,
     /// Bind address for HTTP server.
     bind_addr: SocketAddr,
     /// Running flag.
@@ -37,6 +39,7 @@ impl CloudInitServer {
         Self {
             data_dir: data_dir.as_ref().to_path_buf(),
             boot_dir: None,
+            iso_dir: None,
             bind_addr,
             running: Arc::new(AtomicBool::new(false)),
             user_data: None,
@@ -47,6 +50,12 @@ impl CloudInitServer {
     /// Set directory for serving boot files (kernel, initrd).
     pub fn with_boot_dir<P: AsRef<Path>>(mut self, boot_dir: P) -> Self {
         self.boot_dir = Some(boot_dir.as_ref().to_path_buf());
+        self
+    }
+
+    /// Set directory for serving ISO files.
+    pub fn with_iso_dir<P: AsRef<Path>>(mut self, iso_dir: P) -> Self {
+        self.iso_dir = Some(iso_dir.as_ref().to_path_buf());
         self
     }
 
@@ -137,6 +146,17 @@ impl CloudInitServer {
         let (method, path) = self.parse_request(&request);
 
         info!("HTTP {} {} from {}", method, path, addr);
+
+        // Handle ISO file requests (under /iso/ prefix)
+        if method == "GET" && path.starts_with("/iso/") && self.iso_dir.is_some() {
+            let iso_path = path.strip_prefix("/iso/").unwrap_or("");
+            if let Some(served) = self.try_serve_iso_file(iso_path, &mut stream) {
+                if served {
+                    return Ok(());
+                }
+                // File not found, fall through to 404
+            }
+        }
 
         // Handle boot file requests separately (binary data)
         if method == "GET" && self.boot_dir.is_some() {
@@ -305,6 +325,100 @@ impl CloudInitServer {
                 }
 
                 info!("HTTP: Transfer complete: {} ({} bytes)", clean_path, total_sent);
+                Some(true)
+            }
+            Err(_) => Some(false),
+        }
+    }
+
+    /// Try to serve an ISO file directly to the stream.
+    /// Returns Some(true) if file was served, Some(false) if not found, None if iso_dir not set.
+    fn try_serve_iso_file(&self, path: &str, stream: &mut TcpStream) -> Option<bool> {
+        let iso_dir = self.iso_dir.as_ref()?;
+
+        // Sanitize path - prevent directory traversal
+        let clean_path = path.trim_start_matches('/');
+        if clean_path.is_empty() || clean_path.contains("..") {
+            return Some(false);
+        }
+
+        let file_path = iso_dir.join(clean_path);
+
+        // Check if file exists and is within iso_dir
+        if !file_path.starts_with(iso_dir) || !file_path.is_file() {
+            return Some(false);
+        }
+
+        match File::open(&file_path) {
+            Ok(mut file) => {
+                let metadata = match file.metadata() {
+                    Ok(m) => m,
+                    Err(_) => return Some(false),
+                };
+                let file_size = metadata.len();
+
+                info!("HTTP: Serving ISO file {} ({:.2} GB)",
+                    clean_path,
+                    file_size as f64 / 1_073_741_824.0
+                );
+
+                // Build and send response header
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\n\
+                     Content-Type: application/x-iso9660-image\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n",
+                    file_size
+                );
+
+                if let Err(e) = stream.write_all(header.as_bytes()) {
+                    error!("Failed to write HTTP header: {}", e);
+                    return Some(true);
+                }
+
+                // Stream file content in larger chunks for ISO files
+                let mut buffer = [0u8; 262144]; // 256KB chunks for ISOs
+                let mut total_sent = 0u64;
+                let mut last_progress = 0u64;
+                let progress_interval = 100 * 1024 * 1024; // Log every 100MB
+
+                loop {
+                    match file.read(&mut buffer) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            if let Err(e) = stream.write_all(&buffer[..n]) {
+                                error!("Failed to write ISO data: {}", e);
+                                return Some(true);
+                            }
+                            total_sent += n as u64;
+
+                            // Log progress for large files
+                            if total_sent - last_progress >= progress_interval {
+                                let percent = (total_sent as f64 / file_size as f64) * 100.0;
+                                info!("HTTP: ISO transfer progress: {:.1}% ({:.0} MB / {:.0} MB)",
+                                    percent,
+                                    total_sent as f64 / 1_048_576.0,
+                                    file_size as f64 / 1_048_576.0
+                                );
+                                last_progress = total_sent;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to read ISO file {}: {}", clean_path, e);
+                            return Some(true);
+                        }
+                    }
+                }
+
+                if let Err(e) = stream.flush() {
+                    error!("Failed to flush stream: {}", e);
+                }
+
+                info!("HTTP: ISO transfer complete: {} ({:.2} GB)",
+                    clean_path,
+                    total_sent as f64 / 1_073_741_824.0
+                );
                 Some(true)
             }
             Err(_) => Some(false),

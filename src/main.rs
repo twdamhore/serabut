@@ -173,8 +173,8 @@ fn main() {
         Ipv4Addr::UNSPECIFIED
     };
 
-    // Step 1: Download/verify netboot image (unless skipped or monitor-only)
-    let (tftp_root, boot_file_bios, boot_file_efi, iso_url) = if !args.skip_download && !args.monitor_only {
+    // Step 1: Download/verify netboot image and ISO (unless skipped or monitor-only)
+    let (tftp_root, iso_dir, boot_file_bios, boot_file_efi, iso_filename) = if !args.skip_download && !args.monitor_only {
         info!("=== Preparing {} netboot image ===", netboot_config.name);
 
         let manager = NetbootManager::new(&args.data_dir, netboot_config.clone());
@@ -183,9 +183,23 @@ fn main() {
                 info!("Netboot files ready at: {}", root.display());
                 let bios = manager.config().boot_file_bios.clone();
                 let efi = manager.config().boot_file_efi.clone();
-                // Discover ISO URL for kernel parameter
-                let iso = manager.discover_iso_url().ok();
-                (Some(root), bios, efi, iso)
+                let iso_dir_path = manager.iso_dir().to_path_buf();
+
+                // Download and verify ISO locally (for autoinstall)
+                info!("=== Preparing live server ISO ===");
+                let iso_file = match manager.ensure_iso_ready() {
+                    Ok(filename) => {
+                        info!("ISO ready: {}", filename);
+                        Some(filename)
+                    }
+                    Err(e) => {
+                        warn!("Failed to prepare ISO: {}", e);
+                        warn!("Autoinstall may fall back to downloading from internet");
+                        None
+                    }
+                };
+
+                (Some(root), Some(iso_dir_path), bios, efi, iso_file)
             }
             Err(e) => {
                 error!("Failed to prepare netboot image: {}", e);
@@ -205,13 +219,31 @@ fn main() {
         info!("Using existing netboot files at: {}", tftp_root.display());
         // Use boot files from config, but also check what's available
         let (bios, efi) = detect_boot_files(&tftp_root);
-        // Discover ISO URL
+
+        // Check for existing ISO
         let manager = NetbootManager::new(&args.data_dir, netboot_config.clone());
-        let iso = manager.discover_iso_url().ok();
-        (Some(tftp_root), bios, efi, iso)
+        let iso_dir_path = manager.iso_dir().to_path_buf();
+        let iso_file = if iso_dir_path.exists() {
+            // Find existing ISO file in directory
+            std::fs::read_dir(&iso_dir_path)
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .find(|e| e.path().extension().map_or(false, |ext| ext == "iso"))
+                        .map(|e| e.file_name().to_string_lossy().to_string())
+                })
+        } else {
+            None
+        };
+        if let Some(ref f) = iso_file {
+            info!("Found existing ISO: {}", f);
+        }
+
+        (Some(tftp_root), Some(iso_dir_path), bios, efi, iso_file)
     } else {
         // Monitor only mode
-        (None, netboot_config.boot_file_bios.clone(), netboot_config.boot_file_efi.clone(), None)
+        (None, None, netboot_config.boot_file_bios.clone(), netboot_config.boot_file_efi.clone(), None)
     };
 
     info!("BIOS boot file: {}", boot_file_bios);
@@ -244,15 +276,22 @@ fn main() {
         let http_boot_url = format!("http://{}:{}", server_ip, args.http_port);
         info!("HTTP boot URL for kernel/initrd: {}", http_boot_url);
 
+        // Build local ISO URL if we have a local ISO
+        let local_iso_url = if let Some(ref filename) = iso_filename {
+            Some(format!("http://{}:{}/iso/{}", server_ip, args.http_port, filename))
+        } else {
+            None
+        };
+
         // Generate bootloader configs with autoinstall parameters and HTTP boot
         if let Some(ref root) = tftp_root {
             let mut generator = BootloaderConfigGenerator::new(root)
                 .with_autoinstall(autoinstall_config)
                 .with_http_boot(&http_boot_url);
 
-            // Add ISO URL if discovered
-            if let Some(ref url) = iso_url {
-                info!("ISO URL for installer: {}", url);
+            // Add local ISO URL for faster installs
+            if let Some(ref url) = local_iso_url {
+                info!("ISO URL for installer (local): {}", url);
                 generator = generator.with_iso_url(url);
             }
 
@@ -270,6 +309,12 @@ fn main() {
         if let Some(ref root) = tftp_root {
             http_server = http_server.with_boot_dir(root);
             info!("HTTP server will serve boot files from: {}", root.display());
+        }
+
+        // Add ISO directory for serving ISO files via HTTP
+        if let Some(ref iso_path) = iso_dir {
+            http_server = http_server.with_iso_dir(iso_path);
+            info!("HTTP server will serve ISO files from: {}", iso_path.display());
         }
 
         // Load user-data if provided

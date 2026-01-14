@@ -3,12 +3,13 @@
 //! Downloads and extracts netboot images for various operating systems.
 
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
 use regex::Regex;
+use sha2::{Digest, Sha256};
 use tar::Archive;
 use tracing::{debug, info, warn};
 
@@ -20,6 +21,8 @@ pub struct NetbootManager {
     data_dir: PathBuf,
     /// Directory where extracted TFTP files are served from.
     tftp_root: PathBuf,
+    /// Directory where ISO files are stored for HTTP serving.
+    iso_dir: PathBuf,
     /// Netboot configuration.
     config: NetbootConfig,
 }
@@ -33,10 +36,12 @@ impl NetbootManager {
     pub fn new(data_dir: impl AsRef<Path>, config: NetbootConfig) -> Self {
         let data_dir = data_dir.as_ref().to_path_buf();
         let tftp_root = data_dir.join("tftp");
+        let iso_dir = data_dir.join("iso").join(&config.id);
 
         Self {
             data_dir,
             tftp_root,
+            iso_dir,
             config,
         }
     }
@@ -44,6 +49,11 @@ impl NetbootManager {
     /// Get the TFTP root directory.
     pub fn tftp_root(&self) -> &Path {
         &self.tftp_root
+    }
+
+    /// Get the ISO directory for HTTP serving.
+    pub fn iso_dir(&self) -> &Path {
+        &self.iso_dir
     }
 
     /// Get the netboot configuration.
@@ -111,6 +121,162 @@ impl NetbootManager {
         }
 
         Err(anyhow!("Could not find live server ISO on releases page"))
+    }
+
+    /// Ensure the live server ISO is downloaded and verified locally.
+    ///
+    /// Downloads and verifies the ISO using SHA256SUMS from the releases page.
+    /// Returns the ISO filename for use in kernel parameters.
+    pub fn ensure_iso_ready(&self) -> Result<String> {
+        // Create ISO directory
+        fs::create_dir_all(&self.iso_dir)
+            .context("Failed to create ISO directory")?;
+
+        // Fetch SHA256SUMS to discover filename and checksum
+        let (iso_filename, expected_sha256) = self.discover_iso_sha256()?;
+        let iso_path = self.iso_dir.join(&iso_filename);
+
+        // Check if we already have the correct ISO
+        if iso_path.exists() {
+            info!("Checking existing ISO: {}", iso_filename);
+            let actual_sha256 = self.compute_file_sha256(&iso_path)?;
+
+            if actual_sha256 == expected_sha256 {
+                info!("ISO verified: {} (checksum matches)", iso_filename);
+                return Ok(iso_filename);
+            } else {
+                warn!("ISO checksum mismatch, re-downloading...");
+                fs::remove_file(&iso_path).ok();
+            }
+        }
+
+        // Download the ISO
+        let iso_url = format!("{}/{}", self.config.base_url, iso_filename);
+        info!("Downloading ISO: {} ...", iso_url);
+        self.download_large_file(&iso_url, &iso_path)?;
+
+        // Verify downloaded file
+        info!("Verifying ISO checksum...");
+        let actual_sha256 = self.compute_file_sha256(&iso_path)?;
+        if actual_sha256 != expected_sha256 {
+            fs::remove_file(&iso_path).ok();
+            return Err(anyhow!(
+                "ISO checksum verification failed!\nExpected: {}\nActual: {}",
+                expected_sha256,
+                actual_sha256
+            ));
+        }
+
+        info!("ISO verified: {} (checksum OK)", iso_filename);
+        Ok(iso_filename)
+    }
+
+    /// Discover ISO filename and SHA256 checksum from Ubuntu SHA256SUMS file.
+    fn discover_iso_sha256(&self) -> Result<(String, String)> {
+        let sha256sums_url = format!("{}/SHA256SUMS", self.config.base_url);
+        info!("Fetching SHA256SUMS from {} ...", sha256sums_url);
+
+        let response = reqwest::blocking::get(&sha256sums_url)
+            .context("Failed to fetch SHA256SUMS")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to fetch SHA256SUMS: HTTP {}", response.status()));
+        }
+
+        let body = response.text().context("Failed to read SHA256SUMS")?;
+
+        // Look for live-server ISO line
+        // Format: <sha256>  <filename> or <sha256> *<filename>
+        let pattern = r"^([a-f0-9]{64})\s+\*?(ubuntu-[\d.]+(?:\.\d+)?-live-server-amd64\.iso)\s*$";
+        let re = Regex::new(pattern).context("Failed to compile regex")?;
+
+        for line in body.lines() {
+            if let Some(captures) = re.captures(line) {
+                let sha256 = captures.get(1).unwrap().as_str().to_string();
+                let filename = captures.get(2).unwrap().as_str().to_string();
+                info!("Found ISO: {} (sha256: {}...)", filename, &sha256[..16]);
+                return Ok((filename, sha256));
+            }
+        }
+
+        Err(anyhow!("Could not find live server ISO in SHA256SUMS"))
+    }
+
+    /// Compute SHA256 checksum of a file.
+    fn compute_file_sha256(&self, path: &Path) -> Result<String> {
+        let file = File::open(path)
+            .with_context(|| format!("Failed to open {}", path.display()))?;
+
+        let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1MB buffer
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 65536]; // 64KB chunks
+
+        loop {
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..bytes_read]);
+        }
+
+        let result = hasher.finalize();
+        Ok(format!("{:x}", result))
+    }
+
+    /// Download a large file with progress logging.
+    fn download_large_file(&self, url: &str, dest: &Path) -> Result<()> {
+        let response = reqwest::blocking::get(url)
+            .context("Failed to start download")?;
+
+        if !response.status().is_success() {
+            return Err(anyhow!("Failed to download: HTTP {}", response.status()));
+        }
+
+        let total_size = response.content_length();
+        if let Some(size) = total_size {
+            info!("Download size: {:.2} GB", size as f64 / 1_073_741_824.0);
+        }
+
+        let mut file = File::create(dest)
+            .with_context(|| format!("Failed to create {}", dest.display()))?;
+
+        // Stream the download
+        let mut downloaded = 0u64;
+        let mut last_progress = 0u64;
+        let progress_interval = 100 * 1024 * 1024; // Log every 100MB
+
+        let mut reader = BufReader::new(response);
+        let mut buffer = [0u8; 65536]; // 64KB chunks
+
+        loop {
+            let bytes_read = reader.read(&mut buffer)?;
+            if bytes_read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..bytes_read])?;
+            downloaded += bytes_read as u64;
+
+            // Log progress
+            if let Some(total) = total_size {
+                if downloaded - last_progress >= progress_interval {
+                    let percent = (downloaded as f64 / total as f64) * 100.0;
+                    info!("Download progress: {:.1}% ({:.0} MB / {:.0} MB)",
+                        percent,
+                        downloaded as f64 / 1_048_576.0,
+                        total as f64 / 1_048_576.0
+                    );
+                    last_progress = downloaded;
+                }
+            }
+        }
+
+        file.flush()?;
+        info!("Download complete: {} ({:.2} GB)",
+            dest.display(),
+            downloaded as f64 / 1_073_741_824.0
+        );
+
+        Ok(())
     }
 
     /// Discover the latest Ubuntu netboot filename from the releases page.
