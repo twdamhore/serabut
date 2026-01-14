@@ -1,21 +1,20 @@
 //! Netboot image manager.
 //!
-//! Downloads, verifies, and extracts netboot images for various operating systems.
+//! Downloads and extracts netboot images for various operating systems.
 
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 use flate2::read::GzDecoder;
 use regex::Regex;
-use sha2::{Digest, Sha256};
 use tar::Archive;
 use tracing::{debug, info, warn};
 
 use super::config::NetbootConfig;
 
-/// Manages netboot image downloads and verification.
+/// Manages netboot image downloads.
 pub struct NetbootManager {
     /// Directory to store netboot files.
     data_dir: PathBuf,
@@ -80,19 +79,6 @@ impl NetbootManager {
         info!("Downloading {} ...", archive_url);
         self.download_archive_from_url(&archive_url, &archive_path)?;
 
-        // Verify SHA256 if available
-        if let Some(expected) = self.get_expected_sha256_for(&archive_filename)? {
-            let local_sha256 = self.compute_sha256(&archive_path)?;
-            if local_sha256 != expected {
-                return Err(anyhow!(
-                    "SHA256 verification failed. Expected: {}, Got: {}",
-                    expected,
-                    local_sha256
-                ));
-            }
-            info!("SHA256 verification passed");
-        }
-
         // Extract the archive
         self.extract_archive(&archive_path)?;
 
@@ -129,83 +115,6 @@ impl NetbootManager {
         Err(anyhow!(
             "Could not find netboot tarball on releases page. Looking for pattern: ubuntu-*.netboot-amd64.tar.gz"
         ))
-    }
-
-    /// Get expected SHA256 hash for a specific archive filename.
-    fn get_expected_sha256_for(&self, archive_filename: &str) -> Result<Option<String>> {
-        // First check if we have a hardcoded hash
-        if let Some(ref hash) = self.config.expected_sha256 {
-            return Ok(Some(hash.clone()));
-        }
-
-        // Try to fetch from SHA256SUMS
-        if let Some(url) = self.config.sha256sums_url() {
-            return self.fetch_sha256_from_sums(&url, archive_filename);
-        }
-
-        // No verification available
-        Ok(None)
-    }
-
-    /// Fetch SHA256 hash from a SHA256SUMS file.
-    fn fetch_sha256_from_sums(&self, url: &str, archive_filename: &str) -> Result<Option<String>> {
-        debug!("Fetching SHA256SUMS from {}", url);
-
-        let response = match reqwest::blocking::get(url) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Could not fetch SHA256SUMS: {}", e);
-                return Ok(None);
-            }
-        };
-
-        if !response.status().is_success() {
-            warn!("SHA256SUMS not available: HTTP {}", response.status());
-            return Ok(None);
-        }
-
-        let body = response.text().context("Failed to read SHA256SUMS")?;
-
-        // Parse SHA256SUMS file to find our archive
-        for line in body.lines() {
-            // Format: "sha256hash *filename" or "sha256hash  filename"
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let filename = parts[1].trim_start_matches('*');
-                if filename == archive_filename {
-                    return Ok(Some(parts[0].to_lowercase()));
-                }
-            }
-        }
-
-        warn!(
-            "Could not find {} in SHA256SUMS",
-            archive_filename
-        );
-        Ok(None)
-    }
-
-    /// Compute SHA256 hash of a file.
-    fn compute_sha256(&self, path: &Path) -> Result<String> {
-        let file = File::open(path)
-            .with_context(|| format!("Failed to open {}", path.display()))?;
-
-        let mut reader = BufReader::new(file);
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            let bytes_read = reader
-                .read(&mut buffer)
-                .context("Failed to read file for hashing")?;
-            if bytes_read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..bytes_read]);
-        }
-
-        let hash = hasher.finalize();
-        Ok(format!("{:x}", hash))
     }
 
     /// Download an archive from a URL.
@@ -481,7 +390,7 @@ mod tests {
         let config = NetbootConfigs::debian_12();
         let manager = NetbootManager::new("/tmp/test-debian", config);
         assert_eq!(manager.config().id, "debian-12");
-        assert!(manager.config().sha256sums_url().is_some());
+        assert_eq!(manager.config().name, "Debian 12 (Bookworm)");
     }
 
     #[test]

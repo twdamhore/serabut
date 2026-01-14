@@ -13,12 +13,8 @@ pub struct NetbootConfig {
     pub id: String,
     /// Base URL for downloads
     pub base_url: String,
-    /// Netboot archive filename
+    /// Netboot archive filename (may be auto-discovered for Ubuntu)
     pub archive_filename: String,
-    /// SHA256SUMS filename (None if not available)
-    pub sha256sums_filename: Option<String>,
-    /// Expected SHA256 hash (if sha256sums_filename is None)
-    pub expected_sha256: Option<String>,
     /// Boot file for BIOS clients
     pub boot_file_bios: String,
     /// Boot file for EFI clients
@@ -48,13 +44,6 @@ impl NetbootConfig {
     pub fn archive_url(&self) -> String {
         format!("{}/{}", self.base_url, self.archive_filename)
     }
-
-    /// Get the full URL for SHA256SUMS (if available).
-    pub fn sha256sums_url(&self) -> Option<String> {
-        self.sha256sums_filename
-            .as_ref()
-            .map(|f| format!("{}/{}", self.base_url, f))
-    }
 }
 
 /// Pre-defined netboot configurations.
@@ -62,14 +51,13 @@ pub struct NetbootConfigs;
 
 impl NetbootConfigs {
     /// Ubuntu 24.04 LTS (Noble Numbat) - amd64
+    /// Note: Actual filename is auto-discovered from releases page
     pub fn ubuntu_24_04() -> NetbootConfig {
         NetbootConfig {
             name: "Ubuntu 24.04 LTS (Noble Numbat)".to_string(),
             id: "ubuntu-24.04".to_string(),
             base_url: "https://releases.ubuntu.com/24.04".to_string(),
-            archive_filename: "ubuntu-24.04.3-netboot-amd64.tar.gz".to_string(),
-            sha256sums_filename: Some("SHA256SUMS".to_string()),
-            expected_sha256: None,
+            archive_filename: "ubuntu-24.04-netboot-amd64.tar.gz".to_string(), // Auto-discovered
             boot_file_bios: "amd64/pxelinux.0".to_string(),
             boot_file_efi: "amd64/grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
@@ -83,9 +71,7 @@ impl NetbootConfigs {
             name: "Rocky Linux 9".to_string(),
             id: "rocky-9".to_string(),
             base_url: "https://download.rockylinux.org/pub/rocky/9/BaseOS/x86_64/os/images/pxeboot".to_string(),
-            archive_filename: "initrd.img".to_string(), // Rocky doesn't use tar.gz
-            sha256sums_filename: None, // Would need separate handling
-            expected_sha256: None,
+            archive_filename: "initrd.img".to_string(),
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
@@ -99,8 +85,6 @@ impl NetbootConfigs {
             id: "rocky-10".to_string(),
             base_url: "https://download.rockylinux.org/pub/rocky/10/BaseOS/x86_64/os/images/pxeboot".to_string(),
             archive_filename: "initrd.img".to_string(),
-            sha256sums_filename: None,
-            expected_sha256: None,
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
@@ -114,8 +98,6 @@ impl NetbootConfigs {
             id: "alma-9".to_string(),
             base_url: "https://repo.almalinux.org/almalinux/9/BaseOS/x86_64/os/images/pxeboot".to_string(),
             archive_filename: "initrd.img".to_string(),
-            sha256sums_filename: None,
-            expected_sha256: None,
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
@@ -129,8 +111,6 @@ impl NetbootConfigs {
             id: "alma-10".to_string(),
             base_url: "https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os/images/pxeboot".to_string(),
             archive_filename: "initrd.img".to_string(),
-            sha256sums_filename: None,
-            expected_sha256: None,
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubx64.efi".to_string(),
             arch: NetbootArch::Amd64,
@@ -144,8 +124,6 @@ impl NetbootConfigs {
             id: "debian-12".to_string(),
             base_url: "https://deb.debian.org/debian/dists/bookworm/main/installer-amd64/current/images/netboot".to_string(),
             archive_filename: "netboot.tar.gz".to_string(),
-            sha256sums_filename: Some("SHA256SUMS".to_string()),
-            expected_sha256: None,
             boot_file_bios: "pxelinux.0".to_string(),
             boot_file_efi: "grubnetx64.efi.signed".to_string(),
             arch: NetbootArch::Amd64,
@@ -200,7 +178,6 @@ mod tests {
         assert_eq!(config.id, "ubuntu-24.04");
         assert_eq!(config.name, "Ubuntu 24.04 LTS (Noble Numbat)");
         assert!(config.archive_url().contains("ubuntu-24.04"));
-        assert!(config.sha256sums_url().is_some());
         assert_eq!(config.boot_file_bios, "amd64/pxelinux.0");
         assert_eq!(config.boot_file_efi, "amd64/grubx64.efi");
         assert_eq!(config.arch, NetbootArch::Amd64);
@@ -212,7 +189,6 @@ mod tests {
         assert_eq!(config.id, "debian-12");
         assert_eq!(config.name, "Debian 12 (Bookworm)");
         assert!(config.archive_url().contains("bookworm"));
-        assert!(config.sha256sums_url().is_some());
         assert_eq!(config.boot_file_efi, "grubnetx64.efi.signed");
     }
 
@@ -222,7 +198,6 @@ mod tests {
         assert_eq!(config.id, "rocky-9");
         assert_eq!(config.name, "Rocky Linux 9");
         assert!(config.archive_url().contains("rocky/9"));
-        assert!(config.sha256sums_url().is_none());
         assert_eq!(config.boot_file_efi, "grubx64.efi");
     }
 
@@ -232,7 +207,6 @@ mod tests {
         assert_eq!(config.id, "rocky-10");
         assert_eq!(config.name, "Rocky Linux 10");
         assert!(config.archive_url().contains("rocky/10"));
-        assert!(config.sha256sums_url().is_none());
         assert_eq!(config.boot_file_efi, "grubx64.efi");
     }
 
@@ -242,7 +216,6 @@ mod tests {
         assert_eq!(config.id, "alma-9");
         assert_eq!(config.name, "AlmaLinux 9");
         assert!(config.archive_url().contains("almalinux/9"));
-        assert!(config.sha256sums_url().is_none());
         assert_eq!(config.boot_file_efi, "grubx64.efi");
     }
 
@@ -252,7 +225,6 @@ mod tests {
         assert_eq!(config.id, "alma-10");
         assert_eq!(config.name, "AlmaLinux 10");
         assert!(config.archive_url().contains("almalinux/10"));
-        assert!(config.sha256sums_url().is_none());
         assert_eq!(config.boot_file_efi, "grubx64.efi");
     }
 
@@ -317,20 +289,6 @@ mod tests {
         let url = config.archive_url();
         assert!(url.starts_with("https://"));
         assert!(url.ends_with(".tar.gz"));
-    }
-
-    #[test]
-    fn test_sha256sums_url_some() {
-        let config = NetbootConfigs::ubuntu_24_04();
-        let url = config.sha256sums_url();
-        assert!(url.is_some());
-        assert!(url.unwrap().ends_with("SHA256SUMS"));
-    }
-
-    #[test]
-    fn test_sha256sums_url_none() {
-        let config = NetbootConfigs::rocky_9();
-        assert!(config.sha256sums_url().is_none());
     }
 
     #[test]
