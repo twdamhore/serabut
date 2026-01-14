@@ -152,6 +152,9 @@ impl BootloaderConfigGenerator {
         // Add ISO URL if specified
         if let Some(ref url) = self.iso_url {
             extra_params.push_str(&format!(" url={}", url));
+            // Prevent cloud-init from also downloading the ISO (it parses url= too)
+            // See: https://askubuntu.com/questions/1329734
+            extra_params.push_str(" cloud-config-url=/dev/null");
         }
 
         // Add autoinstall parameters
