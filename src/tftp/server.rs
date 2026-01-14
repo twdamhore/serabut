@@ -224,17 +224,28 @@ impl TftpServer {
         let file_size = file.metadata()?.len();
 
         // Determine block size
+        // If client requests tsize but not blksize, proactively offer larger blocks
+        // 1468 = Ethernet MTU (1500) - IP header (20) - UDP header (8) - TFTP header (4)
+        const OPTIMAL_BLOCK_SIZE: usize = 1468;
+
         let mut block_size = DEFAULT_BLOCK_SIZE;
         let mut tsize_requested = false;
+        let mut blksize_requested = false;
 
         if let Some(blksize_str) = options.get("blksize") {
             if let Ok(requested) = blksize_str.parse::<usize>() {
                 block_size = requested.min(MAX_BLOCK_SIZE).max(8);
+                blksize_requested = true;
             }
         }
 
         if options.contains_key("tsize") {
             tsize_requested = true;
+            // If client supports options (tsize) but didn't request blksize,
+            // proactively offer larger blocks for better performance
+            if !blksize_requested {
+                block_size = OPTIMAL_BLOCK_SIZE;
+            }
         }
 
         // Create transfer socket (use ephemeral port)
@@ -254,7 +265,7 @@ impl TftpServer {
                 oack.extend_from_slice(b"blksize\0");
                 oack.extend_from_slice(block_size.to_string().as_bytes());
                 oack.push(0);
-                debug!("TFTP: Using block size {} for {}", block_size, filename);
+                info!("TFTP: Using block size {} for {}", block_size, clean_filename);
             }
 
             if tsize_requested {
