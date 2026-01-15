@@ -253,3 +253,301 @@ fn main() -> Result<()> {
 
     run_listener(args.interface.as_deref()).context("Failed to run listener")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to create a minimal DHCP packet
+    fn create_dhcp_packet(
+        op: u8,
+        htype: u8,
+        hlen: u8,
+        mac: [u8; 6],
+        message_type: Option<u8>,
+        vendor_class: Option<&str>,
+        user_class: Option<&str>,
+    ) -> Vec<u8> {
+        let mut packet = vec![0u8; 240];
+
+        // Basic DHCP header
+        packet[0] = op; // op
+        packet[1] = htype; // htype
+        packet[2] = hlen; // hlen
+        // bytes 3-27 are zeros (hops, xid, secs, flags, addresses)
+
+        // MAC address at offset 28
+        packet[28..34].copy_from_slice(&mac);
+
+        // Magic cookie at offset 236
+        packet[236] = 99;
+        packet[237] = 130;
+        packet[238] = 83;
+        packet[239] = 99;
+
+        // Options start at 240
+        if let Some(mt) = message_type {
+            packet.push(DHCP_OPTION_MESSAGE_TYPE);
+            packet.push(1); // length
+            packet.push(mt);
+        }
+
+        if let Some(vc) = vendor_class {
+            packet.push(DHCP_OPTION_VENDOR_CLASS);
+            packet.push(vc.len() as u8);
+            packet.extend_from_slice(vc.as_bytes());
+        }
+
+        if let Some(uc) = user_class {
+            packet.push(DHCP_OPTION_USER_CLASS);
+            packet.push(uc.len() as u8);
+            packet.extend_from_slice(uc.as_bytes());
+        }
+
+        packet.push(DHCP_OPTION_END);
+
+        packet
+    }
+
+    mod format_mac_tests {
+        use super::*;
+
+        #[test]
+        fn formats_mac_correctly() {
+            let mac = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+            assert_eq!(format_mac(&mac), "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn formats_mac_with_zeros() {
+            let mac = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
+            assert_eq!(format_mac(&mac), "00:11:22:33:44:55");
+        }
+    }
+
+    mod parse_dhcp_options_tests {
+        use super::*;
+
+        #[test]
+        fn parses_message_type() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                None,
+                None,
+            );
+            let (msg_type, _, _) = parse_dhcp_options(&packet);
+            assert_eq!(msg_type, Some(DHCP_DISCOVER));
+        }
+
+        #[test]
+        fn parses_vendor_class() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let (_, vendor_class, _) = parse_dhcp_options(&packet);
+            assert_eq!(vendor_class, Some("PXEClient:Arch:00007".to_string()));
+        }
+
+        #[test]
+        fn parses_user_class_ipxe() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                Some("iPXE"),
+            );
+            let (_, _, user_class) = parse_dhcp_options(&packet);
+            assert_eq!(user_class, Some("iPXE".to_string()));
+        }
+
+        #[test]
+        fn returns_none_for_short_packet() {
+            let packet = vec![0u8; 100]; // Too short
+            let (msg_type, vendor_class, user_class) = parse_dhcp_options(&packet);
+            assert!(msg_type.is_none());
+            assert!(vendor_class.is_none());
+            assert!(user_class.is_none());
+        }
+
+        #[test]
+        fn returns_none_for_bad_magic_cookie() {
+            let mut packet = vec![0u8; 250];
+            // Wrong magic cookie
+            packet[236] = 0;
+            packet[237] = 0;
+            packet[238] = 0;
+            packet[239] = 0;
+            let (msg_type, _, _) = parse_dhcp_options(&packet);
+            assert!(msg_type.is_none());
+        }
+    }
+
+    mod is_pxe_request_tests {
+        use super::*;
+
+        #[test]
+        fn detects_pxe_client() {
+            let vc = Some("PXEClient:Arch:00007:UNDI:003016".to_string());
+            assert!(is_pxe_request(&vc));
+        }
+
+        #[test]
+        fn rejects_non_pxe() {
+            let vc = Some("MSFT 5.0".to_string());
+            assert!(!is_pxe_request(&vc));
+        }
+
+        #[test]
+        fn rejects_none() {
+            assert!(!is_pxe_request(&None));
+        }
+    }
+
+    mod is_ipxe_request_tests {
+        use super::*;
+
+        #[test]
+        fn detects_ipxe() {
+            let uc = Some("iPXE".to_string());
+            assert!(is_ipxe_request(&uc));
+        }
+
+        #[test]
+        fn detects_ipxe_in_longer_string() {
+            let uc = Some("iPXE/1.0.0".to_string());
+            assert!(is_ipxe_request(&uc));
+        }
+
+        #[test]
+        fn rejects_non_ipxe() {
+            let uc = Some("PXEClient".to_string());
+            assert!(!is_ipxe_request(&uc));
+        }
+
+        #[test]
+        fn rejects_none() {
+            assert!(!is_ipxe_request(&None));
+        }
+    }
+
+    mod handle_dhcp_packet_tests {
+        use super::*;
+
+        #[test]
+        fn accepts_pxe_discover() {
+            let packet = create_dhcp_packet(
+                1, // BOOTREQUEST
+                1, // Ethernet
+                6, // MAC length
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let result = handle_dhcp_packet(&packet);
+            assert_eq!(result, Some("aa:bb:cc:dd:ee:ff".to_string()));
+        }
+
+        #[test]
+        fn rejects_non_pxe_discover() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("MSFT 5.0"), // Not PXE
+                None,
+            );
+            let result = handle_dhcp_packet(&packet);
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn rejects_dhcp_request() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_REQUEST), // Not DISCOVER
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let result = handle_dhcp_packet(&packet);
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn rejects_reply_packets() {
+            let packet = create_dhcp_packet(
+                2, // BOOTREPLY, not BOOTREQUEST
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let result = handle_dhcp_packet(&packet);
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn rejects_non_ethernet() {
+            let packet = create_dhcp_packet(
+                1,
+                6, // Not ethernet (6 = IEEE 802)
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let result = handle_dhcp_packet(&packet);
+            assert!(result.is_none());
+        }
+
+        #[test]
+        fn rejects_short_packet() {
+            let packet = vec![0u8; 100];
+            let result = handle_dhcp_packet(&packet);
+            assert!(result.is_none());
+        }
+    }
+
+    mod dhcp_message_type_constants {
+        use super::*;
+
+        #[test]
+        fn discover_is_one() {
+            // RFC 2132 defines DHCPDISCOVER as 1
+            assert_eq!(DHCP_DISCOVER, 1);
+        }
+
+        #[test]
+        fn offer_is_two() {
+            // RFC 2132 defines DHCPOFFER as 2
+            assert_eq!(DHCP_OFFER, 2);
+        }
+
+        #[test]
+        fn request_is_three() {
+            // RFC 2132 defines DHCPREQUEST as 3
+            assert_eq!(DHCP_REQUEST, 3);
+        }
+    }
+}

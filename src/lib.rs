@@ -329,3 +329,354 @@ pub fn profile_exists(name: &str) -> bool {
     let path = profiles_dir().join(format!("{}.ipxe", name));
     path.exists()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+    use std::fs;
+    use tempfile::TempDir;
+
+    // Helper to set up test environment with temp directories
+    fn setup_test_env() -> TempDir {
+        let temp_dir = TempDir::new().unwrap();
+        env::set_var("SERABUT_DATA_DIR", temp_dir.path().join("data"));
+        env::set_var("SERABUT_CONFIG_DIR", temp_dir.path().join("config"));
+        temp_dir
+    }
+
+    mod validate_mac_tests {
+        use super::*;
+
+        #[test]
+        fn valid_mac_lowercase() {
+            assert!(validate_mac("aa:bb:cc:dd:ee:ff").is_ok());
+        }
+
+        #[test]
+        fn valid_mac_uppercase() {
+            assert!(validate_mac("AA:BB:CC:DD:EE:FF").is_ok());
+        }
+
+        #[test]
+        fn valid_mac_mixed_case() {
+            assert!(validate_mac("Aa:Bb:Cc:Dd:Ee:Ff").is_ok());
+        }
+
+        #[test]
+        fn invalid_mac_too_few_octets() {
+            assert!(validate_mac("aa:bb:cc:dd:ee").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_too_many_octets() {
+            assert!(validate_mac("aa:bb:cc:dd:ee:ff:00").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_wrong_separator() {
+            assert!(validate_mac("aa-bb-cc-dd-ee-ff").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_short_octet() {
+            assert!(validate_mac("a:bb:cc:dd:ee:ff").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_long_octet() {
+            assert!(validate_mac("aaa:bb:cc:dd:ee:ff").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_non_hex() {
+            assert!(validate_mac("gg:bb:cc:dd:ee:ff").is_err());
+        }
+
+        #[test]
+        fn invalid_mac_empty() {
+            assert!(validate_mac("").is_err());
+        }
+    }
+
+    mod validate_label_tests {
+        use super::*;
+
+        #[test]
+        fn valid_label_lowercase() {
+            assert!(validate_label("dbnode").is_ok());
+        }
+
+        #[test]
+        fn valid_label_max_length() {
+            assert!(validate_label("abcdefgh").is_ok()); // 8 chars
+        }
+
+        #[test]
+        fn valid_label_empty() {
+            assert!(validate_label("").is_ok());
+        }
+
+        #[test]
+        fn invalid_label_too_long() {
+            assert!(validate_label("abcdefghi").is_err()); // 9 chars
+        }
+
+        #[test]
+        fn invalid_label_uppercase() {
+            assert!(validate_label("DbNode").is_err());
+        }
+
+        #[test]
+        fn invalid_label_numbers() {
+            assert!(validate_label("node01").is_err());
+        }
+
+        #[test]
+        fn invalid_label_special_chars() {
+            assert!(validate_label("db-node").is_err());
+        }
+
+        #[test]
+        fn invalid_label_underscore() {
+            assert!(validate_label("db_node").is_err());
+        }
+    }
+
+    mod normalize_mac_tests {
+        use super::*;
+
+        #[test]
+        fn normalizes_uppercase_to_lowercase() {
+            assert_eq!(normalize_mac("AA:BB:CC:DD:EE:FF"), "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn normalizes_mixed_case() {
+            assert_eq!(normalize_mac("Aa:Bb:Cc:Dd:Ee:Ff"), "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn lowercase_unchanged() {
+            assert_eq!(normalize_mac("aa:bb:cc:dd:ee:ff"), "aa:bb:cc:dd:ee:ff");
+        }
+    }
+
+    mod mac_entry_tests {
+        use super::*;
+
+        #[test]
+        fn new_entry_normalizes_mac() {
+            let entry = MacEntry::new("AA:BB:CC:DD:EE:FF".to_string());
+            assert_eq!(entry.mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(entry.label, "");
+        }
+
+        #[test]
+        fn from_csv_line_valid() {
+            let entry =
+                MacEntry::from_csv_line("mynode,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00")
+                    .unwrap();
+            assert_eq!(entry.label, "mynode");
+            assert_eq!(entry.mac, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn from_csv_line_empty_label() {
+            let entry =
+                MacEntry::from_csv_line(",aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00").unwrap();
+            assert_eq!(entry.label, "");
+            assert_eq!(entry.mac, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn from_csv_line_invalid_too_few_fields() {
+            assert!(MacEntry::from_csv_line("aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00").is_err());
+        }
+
+        #[test]
+        fn from_csv_line_invalid_too_many_fields() {
+            assert!(MacEntry::from_csv_line(
+                "label,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00,extra"
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn from_csv_line_invalid_timestamp() {
+            assert!(MacEntry::from_csv_line("label,aa:bb:cc:dd:ee:ff,not-a-timestamp").is_err());
+        }
+
+        #[test]
+        fn to_csv_line_roundtrip() {
+            let original =
+                MacEntry::from_csv_line("mynode,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00")
+                    .unwrap();
+            let csv = original.to_csv_line();
+            let parsed = MacEntry::from_csv_line(&csv).unwrap();
+            assert_eq!(original.label, parsed.label);
+            assert_eq!(original.mac, parsed.mac);
+            assert_eq!(original.last_seen, parsed.last_seen);
+        }
+    }
+
+    mod find_entry_tests {
+        use super::*;
+
+        fn sample_entries() -> Vec<MacEntry> {
+            vec![
+                MacEntry::from_csv_line("node,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00").unwrap(),
+                MacEntry::from_csv_line(",11:22:33:44:55:66,2026-01-15T12:00:00+00:00").unwrap(),
+                MacEntry::from_csv_line("dbnode,de:ad:be:ef:00:01,2026-01-15T12:00:00+00:00")
+                    .unwrap(),
+            ]
+        }
+
+        #[test]
+        fn find_by_mac_exists() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_mac(&entries, "aa:bb:cc:dd:ee:ff"), Some(0));
+            assert_eq!(find_entry_by_mac(&entries, "11:22:33:44:55:66"), Some(1));
+        }
+
+        #[test]
+        fn find_by_mac_case_insensitive() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_mac(&entries, "AA:BB:CC:DD:EE:FF"), Some(0));
+        }
+
+        #[test]
+        fn find_by_mac_not_found() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_mac(&entries, "00:00:00:00:00:00"), None);
+        }
+
+        #[test]
+        fn find_by_label_exists() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_label(&entries, "node"), Some(0));
+            assert_eq!(find_entry_by_label(&entries, "dbnode"), Some(2));
+        }
+
+        #[test]
+        fn find_by_label_not_found() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_label(&entries, "nonexistent"), None);
+        }
+
+        #[test]
+        fn find_by_label_empty_returns_none() {
+            let entries = sample_entries();
+            assert_eq!(find_entry_by_label(&entries, ""), None);
+        }
+    }
+
+    mod update_or_insert_tests {
+        use super::*;
+
+        #[test]
+        fn insert_new_mac() {
+            let mut entries = Vec::new();
+            update_or_insert_mac(&mut entries, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].mac, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn update_existing_mac() {
+            let mut entries = vec![MacEntry::from_csv_line(
+                ",aa:bb:cc:dd:ee:ff,2020-01-01T00:00:00+00:00",
+            )
+            .unwrap()];
+            let old_time = entries[0].last_seen;
+
+            // Small delay to ensure time changes
+            std::thread::sleep(std::time::Duration::from_millis(10));
+
+            update_or_insert_mac(&mut entries, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(entries.len(), 1);
+            assert!(entries[0].last_seen > old_time);
+        }
+
+        #[test]
+        fn update_normalizes_mac() {
+            let mut entries = vec![MacEntry::from_csv_line(
+                ",aa:bb:cc:dd:ee:ff,2020-01-01T00:00:00+00:00",
+            )
+            .unwrap()];
+
+            update_or_insert_mac(&mut entries, "AA:BB:CC:DD:EE:FF");
+            assert_eq!(entries.len(), 1); // Should update, not insert
+        }
+    }
+
+    mod file_io_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn write_and_read_entries() {
+            let _temp = setup_test_env();
+
+            let entries = vec![
+                MacEntry::from_csv_line("node,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00").unwrap(),
+                MacEntry::from_csv_line(",11:22:33:44:55:66,2026-01-15T13:00:00+00:00").unwrap(),
+            ];
+
+            write_mac_entries(&entries).unwrap();
+            let read_entries = read_mac_entries().unwrap();
+
+            assert_eq!(read_entries.len(), 2);
+            assert_eq!(read_entries[0].label, "node");
+            assert_eq!(read_entries[0].mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(read_entries[1].label, "");
+            assert_eq!(read_entries[1].mac, "11:22:33:44:55:66");
+        }
+
+        #[test]
+        #[serial]
+        fn read_nonexistent_file_returns_empty() {
+            let _temp = setup_test_env();
+            let entries = read_mac_entries().unwrap();
+            assert!(entries.is_empty());
+        }
+
+        #[test]
+        #[serial]
+        fn profiles_list_empty_dir() {
+            let _temp = setup_test_env();
+            let profiles = list_profiles().unwrap();
+            assert!(profiles.is_empty());
+        }
+
+        #[test]
+        #[serial]
+        fn profiles_list_with_files() {
+            let temp = setup_test_env();
+            let profiles_path = temp.path().join("config").join("profiles");
+            fs::create_dir_all(&profiles_path).unwrap();
+
+            fs::write(profiles_path.join("ubuntu.ipxe"), "#!ipxe\nexit").unwrap();
+            fs::write(profiles_path.join("rocky.ipxe"), "#!ipxe\nexit").unwrap();
+            fs::write(profiles_path.join("readme.txt"), "not a profile").unwrap();
+
+            let profiles = list_profiles().unwrap();
+            assert_eq!(profiles.len(), 2);
+            assert!(profiles.contains(&"rocky".to_string()));
+            assert!(profiles.contains(&"ubuntu".to_string()));
+        }
+
+        #[test]
+        #[serial]
+        fn profile_exists_check() {
+            let temp = setup_test_env();
+            let profiles_path = temp.path().join("config").join("profiles");
+            fs::create_dir_all(&profiles_path).unwrap();
+
+            fs::write(profiles_path.join("ubuntu.ipxe"), "#!ipxe\nexit").unwrap();
+
+            assert!(profile_exists("ubuntu"));
+            assert!(!profile_exists("nonexistent"));
+        }
+    }
+}
