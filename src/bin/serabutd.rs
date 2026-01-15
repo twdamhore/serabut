@@ -1,22 +1,37 @@
 use anyhow::{Context, Result};
+use clap::Parser;
 use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 use serabut::{ensure_data_dir, read_mac_entries, update_or_insert_mac, write_mac_entries};
-use std::env;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 
 // DHCP message types
 const DHCP_DISCOVER: u8 = 1;
+#[allow(dead_code)]
+const DHCP_OFFER: u8 = 2;
+#[allow(dead_code)]
+const DHCP_REQUEST: u8 = 3;
 
 // DHCP options
 const DHCP_OPTION_MESSAGE_TYPE: u8 = 53;
 const DHCP_OPTION_VENDOR_CLASS: u8 = 60;
+#[allow(dead_code)]
+const DHCP_OPTION_USER_CLASS: u8 = 77; // Used to detect iPXE vs PXE ROM
 const DHCP_OPTION_END: u8 = 255;
+
+#[derive(Parser)]
+#[command(name = "serabutd")]
+#[command(about = "Serabut daemon - listens for PXE boot requests")]
+struct Args {
+    /// Network interface to listen on (e.g., eth0)
+    #[arg(short, long)]
+    interface: Option<String>,
+}
 
 fn format_mac(bytes: &[u8]) -> String {
     bytes
@@ -26,18 +41,19 @@ fn format_mac(bytes: &[u8]) -> String {
         .join(":")
 }
 
-fn parse_dhcp_options(data: &[u8]) -> (Option<u8>, Option<String>) {
+fn parse_dhcp_options(data: &[u8]) -> (Option<u8>, Option<String>, Option<String>) {
     let mut message_type = None;
     let mut vendor_class = None;
+    let mut user_class = None;
 
     // DHCP options start at offset 240 (after magic cookie)
     if data.len() < 240 {
-        return (message_type, vendor_class);
+        return (message_type, vendor_class, user_class);
     }
 
     // Check magic cookie (99, 130, 83, 99)
     if data[236..240] != [99, 130, 83, 99] {
-        return (message_type, vendor_class);
+        return (message_type, vendor_class, user_class);
     }
 
     let mut i = 240;
@@ -69,19 +85,30 @@ fn parse_dhcp_options(data: &[u8]) -> (Option<u8>, Option<String>) {
             DHCP_OPTION_VENDOR_CLASS => {
                 vendor_class = Some(String::from_utf8_lossy(value).to_string());
             }
+            DHCP_OPTION_USER_CLASS => {
+                user_class = Some(String::from_utf8_lossy(value).to_string());
+            }
             _ => {}
         }
 
         i += 2 + len;
     }
 
-    (message_type, vendor_class)
+    (message_type, vendor_class, user_class)
 }
 
 fn is_pxe_request(vendor_class: &Option<String>) -> bool {
     vendor_class
         .as_ref()
         .map(|vc| vc.starts_with("PXEClient"))
+        .unwrap_or(false)
+}
+
+#[allow(dead_code)]
+fn is_ipxe_request(user_class: &Option<String>) -> bool {
+    user_class
+        .as_ref()
+        .map(|uc| uc.contains("iPXE"))
         .unwrap_or(false)
 }
 
@@ -118,7 +145,7 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<String> {
     }
 
     let mac = format_mac(&dhcp_data[28..34]);
-    let (message_type, vendor_class) = parse_dhcp_options(dhcp_data);
+    let (message_type, vendor_class, _user_class) = parse_dhcp_options(dhcp_data);
 
     // Only process DHCP DISCOVER with PXE vendor class
     if message_type != Some(DHCP_DISCOVER) {
@@ -172,16 +199,17 @@ fn run_listener(interface_name: Option<&str>) -> Result<()> {
             .find(|iface| iface.name == name)
             .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", name))?
     } else {
-        find_default_interface().ok_or_else(|| anyhow::anyhow!("No suitable network interface found"))?
+        find_default_interface()
+            .ok_or_else(|| anyhow::anyhow!("No suitable network interface found"))?
     };
 
-    println!("serabutd starting on interface: {}", interface.name);
-    println!("Listening for PXE boot requests...");
+    eprintln!("serabutd starting on interface: {}", interface.name);
+    eprintln!("Listening for PXE boot requests...");
 
     ensure_data_dir()?;
 
     let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
-        Ok(Ethernet(tx, rx)) => (tx, rx),
+        Ok(Ethernet(_tx, rx)) => ((), rx),
         Ok(_) => return Err(anyhow::anyhow!("Unhandled channel type")),
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -196,7 +224,7 @@ fn run_listener(interface_name: Option<&str>) -> Result<()> {
             Ok(packet) => {
                 if let Some(ethernet) = EthernetPacket::new(packet) {
                     if let Some(mac) = process_packet(&ethernet) {
-                        println!("PXE boot request from: {}", mac);
+                        eprintln!("PXE boot request from: {}", mac);
 
                         // Update mac.txt
                         match read_mac_entries() {
@@ -221,13 +249,7 @@ fn run_listener(interface_name: Option<&str>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
+    let args = Args::parse();
 
-    let interface = if args.len() > 1 {
-        Some(args[1].as_str())
-    } else {
-        None
-    };
-
-    run_listener(interface).context("Failed to run listener")
+    run_listener(args.interface.as_deref()).context("Failed to run listener")
 }

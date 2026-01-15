@@ -1,14 +1,43 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 
-pub const MAC_FILE: &str = "/var/lib/serabut/mac.txt";
-pub const BOOT_FILE: &str = "/var/lib/serabut/boot.txt";
-pub const PROFILES_DIR: &str = "/etc/serabut/profiles";
-pub const DATA_DIR: &str = "/var/lib/serabut";
+// File locking
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+/// Get the data directory, configurable via SERABUT_DATA_DIR env var
+pub fn data_dir() -> PathBuf {
+    env::var("SERABUT_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/serabut"))
+}
+
+/// Get the config directory, configurable via SERABUT_CONFIG_DIR env var
+pub fn config_dir() -> PathBuf {
+    env::var("SERABUT_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/etc/serabut"))
+}
+
+/// Get the MAC file path
+pub fn mac_file_path() -> PathBuf {
+    data_dir().join("mac.txt")
+}
+
+/// Get the boot file path
+pub fn boot_file_path() -> PathBuf {
+    data_dir().join("boot.txt")
+}
+
+/// Get the profiles directory path
+pub fn profiles_dir() -> PathBuf {
+    config_dir().join("profiles")
+}
 
 #[derive(Error, Debug)]
 pub enum SerabutError {
@@ -39,11 +68,14 @@ impl MacEntry {
     pub fn new(mac: String) -> Self {
         Self {
             label: String::new(),
-            mac,
+            mac: normalize_mac(&mac),
             last_seen: Utc::now(),
         }
     }
 
+    /// Parse a MacEntry from a CSV line.
+    /// Format: label,mac,timestamp
+    /// Note: Labels are validated to be a-z only, so commas in labels are not possible.
     pub fn from_csv_line(line: &str) -> Result<Self> {
         let parts: Vec<&str> = line.split(',').collect();
         if parts.len() != 3 {
@@ -71,6 +103,8 @@ impl MacEntry {
     }
 }
 
+/// Validate a label: must be empty or a-z only, max 8 characters
+#[must_use = "validation result must be checked"]
 pub fn validate_label(label: &str) -> Result<(), SerabutError> {
     if label.is_empty() {
         return Ok(());
@@ -84,6 +118,8 @@ pub fn validate_label(label: &str) -> Result<(), SerabutError> {
     Ok(())
 }
 
+/// Validate a MAC address: must be in format aa:bb:cc:dd:ee:ff
+#[must_use = "validation result must be checked"]
 pub fn validate_mac(mac: &str) -> Result<(), SerabutError> {
     let parts: Vec<&str> = mac.split(':').collect();
     if parts.len() != 6 {
@@ -100,22 +136,61 @@ pub fn validate_mac(mac: &str) -> Result<(), SerabutError> {
     Ok(())
 }
 
+/// Normalize a MAC address to lowercase
 pub fn normalize_mac(mac: &str) -> String {
     mac.to_lowercase()
 }
 
+/// Ensure the data directory exists
 pub fn ensure_data_dir() -> Result<()> {
-    fs::create_dir_all(DATA_DIR).context("Failed to create data directory")?;
+    fs::create_dir_all(data_dir()).context("Failed to create data directory")?;
     Ok(())
 }
 
+/// Acquire an exclusive lock on a file (Unix only)
+#[cfg(unix)]
+fn lock_file_exclusive(file: &File) -> Result<()> {
+    use libc::{flock, LOCK_EX};
+    let fd = file.as_raw_fd();
+    let result = unsafe { flock(fd, LOCK_EX) };
+    if result != 0 {
+        return Err(anyhow!("Failed to acquire file lock"));
+    }
+    Ok(())
+}
+
+/// Release a file lock (Unix only)
+#[cfg(unix)]
+fn unlock_file(file: &File) -> Result<()> {
+    use libc::{flock, LOCK_UN};
+    let fd = file.as_raw_fd();
+    let result = unsafe { flock(fd, LOCK_UN) };
+    if result != 0 {
+        return Err(anyhow!("Failed to release file lock"));
+    }
+    Ok(())
+}
+
+/// No-op lock for non-Unix platforms
+#[cfg(not(unix))]
+fn lock_file_exclusive(_file: &File) -> Result<()> {
+    Ok(())
+}
+
+/// No-op unlock for non-Unix platforms
+#[cfg(not(unix))]
+fn unlock_file(_file: &File) -> Result<()> {
+    Ok(())
+}
+
+/// Read MAC entries from the mac.txt file
 pub fn read_mac_entries() -> Result<Vec<MacEntry>> {
-    let path = Path::new(MAC_FILE);
+    let path = mac_file_path();
     if !path.exists() {
         return Ok(Vec::new());
     }
 
-    let file = File::open(path).context("Failed to open mac.txt")?;
+    let file = File::open(&path).context("Failed to open mac.txt")?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
 
@@ -131,21 +206,82 @@ pub fn read_mac_entries() -> Result<Vec<MacEntry>> {
     Ok(entries)
 }
 
+/// Write MAC entries to the mac.txt file with file locking
 pub fn write_mac_entries(entries: &[MacEntry]) -> Result<()> {
     ensure_data_dir()?;
 
-    let mut file = OpenOptions::new()
+    let path = mac_file_path();
+    let file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(MAC_FILE)
+        .open(&path)
         .context("Failed to open mac.txt for writing")?;
 
+    lock_file_exclusive(&file)?;
+
+    let mut writer = std::io::BufWriter::new(&file);
     for entry in entries {
-        writeln!(file, "{}", entry.to_csv_line())?;
+        writeln!(writer, "{}", entry.to_csv_line())?;
     }
+    writer.flush()?;
+
+    unlock_file(&file)?;
 
     Ok(())
+}
+
+/// Read and write MAC entries atomically with file locking.
+/// This prevents race conditions between concurrent readers/writers.
+pub fn with_mac_entries<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce(&mut Vec<MacEntry>) -> Result<T>,
+{
+    ensure_data_dir()?;
+
+    let path = mac_file_path();
+
+    // Open or create the file for read+write
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(&path)
+        .context("Failed to open mac.txt")?;
+
+    lock_file_exclusive(&file)?;
+
+    // Read existing entries
+    let reader = BufReader::new(&file);
+    let mut entries = Vec::new();
+    for line in reader.lines() {
+        let line = line.context("Failed to read line")?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        entries.push(MacEntry::from_csv_line(line)?);
+    }
+
+    // Apply the modification
+    let result = f(&mut entries)?;
+
+    // Truncate and rewrite
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&path)
+        .context("Failed to open mac.txt for writing")?;
+
+    let mut writer = std::io::BufWriter::new(&file);
+    for entry in &entries {
+        writeln!(writer, "{}", entry.to_csv_line())?;
+    }
+    writer.flush()?;
+
+    unlock_file(&file)?;
+
+    Ok(result)
 }
 
 pub fn find_entry_by_mac(entries: &[MacEntry], mac: &str) -> Option<usize> {
@@ -170,13 +306,13 @@ pub fn update_or_insert_mac(entries: &mut Vec<MacEntry>, mac: &str) {
 }
 
 pub fn list_profiles() -> Result<Vec<String>> {
-    let path = Path::new(PROFILES_DIR);
+    let path = profiles_dir();
     if !path.exists() {
         return Ok(Vec::new());
     }
 
     let mut profiles = Vec::new();
-    for entry in fs::read_dir(path).context("Failed to read profiles directory")? {
+    for entry in fs::read_dir(&path).context("Failed to read profiles directory")? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().map_or(false, |ext| ext == "ipxe") {
@@ -190,6 +326,6 @@ pub fn list_profiles() -> Result<Vec<String>> {
 }
 
 pub fn profile_exists(name: &str) -> bool {
-    let path = Path::new(PROFILES_DIR).join(format!("{}.ipxe", name));
+    let path = profiles_dir().join(format!("{}.ipxe", name));
     path.exists()
 }

@@ -1,8 +1,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serabut::{
-    find_entry_by_label, find_entry_by_mac, list_profiles, normalize_mac, read_mac_entries,
-    validate_label, validate_mac, write_mac_entries, SerabutError,
+    find_entry_by_label, find_entry_by_mac, list_profiles, normalize_mac, profiles_dir,
+    read_mac_entries, validate_label, validate_mac, write_mac_entries, SerabutError,
 };
 
 #[derive(Parser)]
@@ -188,7 +188,7 @@ fn cmd_profiles_list() -> Result<()> {
     let profiles = list_profiles()?;
 
     if profiles.is_empty() {
-        println!("No profiles found in /etc/serabut/profiles/");
+        println!("No profiles found in {}/", profiles_dir().display());
         return Ok(());
     }
 

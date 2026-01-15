@@ -34,5 +34,6 @@ serde = { version = "1", features = ["derive"] }
 # Network packet handling (for DHCP)
 pnet = "0.35"
 
-# Async runtime (for daemon)
-tokio = { version = "1", features = ["full"] }
+# File locking (Unix)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
