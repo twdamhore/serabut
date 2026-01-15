@@ -99,6 +99,47 @@ serabut/
 │   │   └── serabutd.rs  # daemon
 ```
 
+### Environment Variables
+
+Paths are configurable for testing without root:
+- `SERABUT_DATA_DIR` - data directory (default: `/var/lib/serabut`)
+- `SERABUT_CONFIG_DIR` - config directory (default: `/etc/serabut`)
+
+Example:
+```bash
+SERABUT_DATA_DIR=/tmp/serabut ./target/debug/serabut mac list
+```
+
+### Running
+
+```bash
+# Build
+cargo build
+
+# Run daemon (needs root for raw sockets)
+sudo ./target/debug/serabutd -i eth0
+
+# CLI commands
+./target/debug/serabut mac list
+./target/debug/serabut mac label aa:bb:cc:dd:ee:ff mynode
+./target/debug/serabut profiles list
+```
+
+### Testing
+
+```bash
+cargo test
+```
+
+65 unit tests covering:
+- MAC/label validation
+- CSV parsing and roundtrip
+- Entry lookup (by MAC, by label)
+- File I/O with temp directories
+- DHCP packet parsing
+- PXE/iPXE detection
+- RFC 2132 DHCP message type constants (DISCOVER=1, OFFER=2, REQUEST=3)
+
 ### MVP Roadmap
 
 **MVP 1 - Discovery**
