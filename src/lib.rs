@@ -1,14 +1,12 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
+use file_lock::{FileLock, FileOptions};
+use macaddr::MacAddr6;
 use std::env;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use thiserror::Error;
-
-// File locking
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 
 /// Get the data directory, configurable via SERABUT_DATA_DIR env var
 pub fn data_dir() -> PathBuf {
@@ -118,68 +116,26 @@ pub fn validate_label(label: &str) -> Result<(), SerabutError> {
     Ok(())
 }
 
-/// Validate a MAC address: must be in format aa:bb:cc:dd:ee:ff
+/// Validate a MAC address using the macaddr crate
 #[must_use = "validation result must be checked"]
 pub fn validate_mac(mac: &str) -> Result<(), SerabutError> {
-    let parts: Vec<&str> = mac.split(':').collect();
-    if parts.len() != 6 {
-        return Err(SerabutError::InvalidMac(mac.to_string()));
-    }
-    for part in parts {
-        if part.len() != 2 {
-            return Err(SerabutError::InvalidMac(mac.to_string()));
-        }
-        if !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(SerabutError::InvalidMac(mac.to_string()));
-        }
-    }
-    Ok(())
+    mac.parse::<MacAddr6>()
+        .map(|_| ())
+        .map_err(|_| SerabutError::InvalidMac(mac.to_string()))
 }
 
-/// Normalize a MAC address to lowercase
+/// Normalize a MAC address to lowercase colon-separated format
+/// Accepts both colon and hyphen separators on input
 pub fn normalize_mac(mac: &str) -> String {
-    mac.to_lowercase()
+    // Use macaddr to parse and format consistently, then lowercase
+    mac.parse::<MacAddr6>()
+        .map(|m| m.to_string().to_lowercase())
+        .unwrap_or_else(|_| mac.to_lowercase())
 }
 
 /// Ensure the data directory exists
 pub fn ensure_data_dir() -> Result<()> {
     fs::create_dir_all(data_dir()).context("Failed to create data directory")?;
-    Ok(())
-}
-
-/// Acquire an exclusive lock on a file (Unix only)
-#[cfg(unix)]
-fn lock_file_exclusive(file: &File) -> Result<()> {
-    use libc::{flock, LOCK_EX};
-    let fd = file.as_raw_fd();
-    let result = unsafe { flock(fd, LOCK_EX) };
-    if result != 0 {
-        return Err(anyhow!("Failed to acquire file lock"));
-    }
-    Ok(())
-}
-
-/// Release a file lock (Unix only)
-#[cfg(unix)]
-fn unlock_file(file: &File) -> Result<()> {
-    use libc::{flock, LOCK_UN};
-    let fd = file.as_raw_fd();
-    let result = unsafe { flock(fd, LOCK_UN) };
-    if result != 0 {
-        return Err(anyhow!("Failed to release file lock"));
-    }
-    Ok(())
-}
-
-/// No-op lock for non-Unix platforms
-#[cfg(not(unix))]
-fn lock_file_exclusive(_file: &File) -> Result<()> {
-    Ok(())
-}
-
-/// No-op unlock for non-Unix platforms
-#[cfg(not(unix))]
-fn unlock_file(_file: &File) -> Result<()> {
     Ok(())
 }
 
@@ -190,7 +146,7 @@ pub fn read_mac_entries() -> Result<Vec<MacEntry>> {
         return Ok(Vec::new());
     }
 
-    let file = File::open(&path).context("Failed to open mac.txt")?;
+    let file = std::fs::File::open(&path).context("Failed to open mac.txt")?;
     let reader = BufReader::new(file);
     let mut entries = Vec::new();
 
@@ -211,23 +167,17 @@ pub fn write_mac_entries(entries: &[MacEntry]) -> Result<()> {
     ensure_data_dir()?;
 
     let path = mac_file_path();
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .context("Failed to open mac.txt for writing")?;
+    let options = FileOptions::new().write(true).create(true).truncate(true);
 
-    lock_file_exclusive(&file)?;
+    let mut lock = FileLock::lock(path, true, options)
+        .context("Failed to acquire file lock")?;
 
-    let mut writer = std::io::BufWriter::new(&file);
     for entry in entries {
-        writeln!(writer, "{}", entry.to_csv_line())?;
+        writeln!(lock.file, "{}", entry.to_csv_line())?;
     }
-    writer.flush()?;
+    lock.file.flush()?;
 
-    unlock_file(&file)?;
-
+    // Lock is automatically released when `lock` is dropped
     Ok(())
 }
 
@@ -241,18 +191,20 @@ where
 
     let path = mac_file_path();
 
-    // Open or create the file for read+write
-    let file = OpenOptions::new()
-        .read(true)
+    // Create file if it doesn't exist
+    OpenOptions::new()
         .write(true)
         .create(true)
         .open(&path)
-        .context("Failed to open mac.txt")?;
+        .context("Failed to create mac.txt")?;
 
-    lock_file_exclusive(&file)?;
+    // Lock for reading
+    let options = FileOptions::new().read(true).write(true);
+    let lock = FileLock::lock(&path, true, options)
+        .context("Failed to acquire file lock")?;
 
     // Read existing entries
-    let reader = BufReader::new(&file);
+    let reader = BufReader::new(&lock.file);
     let mut entries = Vec::new();
     for line in reader.lines() {
         let line = line.context("Failed to read line")?;
@@ -263,23 +215,21 @@ where
         entries.push(MacEntry::from_csv_line(line)?);
     }
 
+    // Release the read lock
+    drop(lock);
+
     // Apply the modification
     let result = f(&mut entries)?;
 
-    // Truncate and rewrite
-    let file = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&path)
-        .context("Failed to open mac.txt for writing")?;
+    // Write back with exclusive lock
+    let options = FileOptions::new().write(true).truncate(true);
+    let mut lock = FileLock::lock(&path, true, options)
+        .context("Failed to acquire file lock for writing")?;
 
-    let mut writer = std::io::BufWriter::new(&file);
     for entry in &entries {
-        writeln!(writer, "{}", entry.to_csv_line())?;
+        writeln!(lock.file, "{}", entry.to_csv_line())?;
     }
-    writer.flush()?;
-
-    unlock_file(&file)?;
+    lock.file.flush()?;
 
     Ok(result)
 }
@@ -374,8 +324,9 @@ mod tests {
         }
 
         #[test]
-        fn invalid_mac_wrong_separator() {
-            assert!(validate_mac("aa-bb-cc-dd-ee-ff").is_err());
+        fn valid_mac_hyphen_separator() {
+            // macaddr crate accepts both colon and hyphen separators
+            assert!(validate_mac("aa-bb-cc-dd-ee-ff").is_ok());
         }
 
         #[test]
@@ -459,6 +410,16 @@ mod tests {
         #[test]
         fn lowercase_unchanged() {
             assert_eq!(normalize_mac("aa:bb:cc:dd:ee:ff"), "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn normalizes_hyphen_to_colon() {
+            assert_eq!(normalize_mac("aa-bb-cc-dd-ee-ff"), "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        fn normalizes_hyphen_uppercase() {
+            assert_eq!(normalize_mac("AA-BB-CC-DD-EE-FF"), "aa:bb:cc:dd:ee:ff");
         }
     }
 

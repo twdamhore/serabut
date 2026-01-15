@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use dhcproto::v4::{DhcpOption, HType, Message, MessageType, Opcode};
+use dhcproto::Decodable;
 use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ipv4::Ipv4Packet;
@@ -9,20 +11,6 @@ use serabut::{ensure_data_dir, read_mac_entries, update_or_insert_mac, write_mac
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
-
-// DHCP message types
-const DHCP_DISCOVER: u8 = 1;
-#[allow(dead_code)]
-const DHCP_OFFER: u8 = 2;
-#[allow(dead_code)]
-const DHCP_REQUEST: u8 = 3;
-
-// DHCP options
-const DHCP_OPTION_MESSAGE_TYPE: u8 = 53;
-const DHCP_OPTION_VENDOR_CLASS: u8 = 60;
-#[allow(dead_code)]
-const DHCP_OPTION_USER_CLASS: u8 = 77; // Used to detect iPXE vs PXE ROM
-const DHCP_OPTION_END: u8 = 255;
 
 #[derive(Parser)]
 #[command(name = "serabutd")]
@@ -41,121 +29,66 @@ fn format_mac(bytes: &[u8]) -> String {
         .join(":")
 }
 
-fn parse_dhcp_options(data: &[u8]) -> (Option<u8>, Option<String>, Option<String>) {
-    let mut message_type = None;
-    let mut vendor_class = None;
-    let mut user_class = None;
-
-    // DHCP options start at offset 240 (after magic cookie)
-    if data.len() < 240 {
-        return (message_type, vendor_class, user_class);
-    }
-
-    // Check magic cookie (99, 130, 83, 99)
-    if data[236..240] != [99, 130, 83, 99] {
-        return (message_type, vendor_class, user_class);
-    }
-
-    let mut i = 240;
-    while i < data.len() {
-        let option = data[i];
-        if option == DHCP_OPTION_END {
-            break;
-        }
-        if option == 0 {
-            // Padding
-            i += 1;
-            continue;
-        }
-        if i + 1 >= data.len() {
-            break;
-        }
-        let len = data[i + 1] as usize;
-        if i + 2 + len > data.len() {
-            break;
-        }
-        let value = &data[i + 2..i + 2 + len];
-
-        match option {
-            DHCP_OPTION_MESSAGE_TYPE => {
-                if len >= 1 {
-                    message_type = Some(value[0]);
-                }
+/// Check if vendor class indicates a PXE client
+fn is_pxe_client(msg: &Message) -> bool {
+    msg.opts()
+        .get(dhcproto::v4::OptionCode::ClassIdentifier)
+        .and_then(|opt| {
+            if let DhcpOption::ClassIdentifier(class_id) = opt {
+                String::from_utf8_lossy(class_id)
+                    .starts_with("PXEClient")
+                    .then_some(true)
+            } else {
+                None
             }
-            DHCP_OPTION_VENDOR_CLASS => {
-                vendor_class = Some(String::from_utf8_lossy(value).to_string());
-            }
-            DHCP_OPTION_USER_CLASS => {
-                user_class = Some(String::from_utf8_lossy(value).to_string());
-            }
-            _ => {}
-        }
-
-        i += 2 + len;
-    }
-
-    (message_type, vendor_class, user_class)
-}
-
-fn is_pxe_request(vendor_class: &Option<String>) -> bool {
-    vendor_class
-        .as_ref()
-        .map(|vc| vc.starts_with("PXEClient"))
+        })
         .unwrap_or(false)
 }
 
+/// Check if user class indicates iPXE
 #[allow(dead_code)]
-fn is_ipxe_request(user_class: &Option<String>) -> bool {
-    user_class
-        .as_ref()
-        .map(|uc| uc.contains("iPXE"))
+fn is_ipxe_client(msg: &Message) -> bool {
+    msg.opts()
+        .get(dhcproto::v4::OptionCode::UserClass)
+        .and_then(|opt| {
+            if let DhcpOption::UserClass(user_class) = opt {
+                String::from_utf8_lossy(user_class)
+                    .contains("iPXE")
+                    .then_some(true)
+            } else {
+                None
+            }
+        })
         .unwrap_or(false)
 }
 
 fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<String> {
-    // DHCP packet structure:
-    // 0: op (1 = request, 2 = reply)
-    // 1: htype (1 = ethernet)
-    // 2: hlen (6 for ethernet)
-    // 3: hops
-    // 4-7: xid
-    // 8-9: secs
-    // 10-11: flags
-    // 12-15: ciaddr
-    // 16-19: yiaddr
-    // 20-23: siaddr
-    // 24-27: giaddr
-    // 28-43: chaddr (client hardware address, 16 bytes, only first 6 used for ethernet)
+    // Parse DHCP message using dhcproto
+    let msg = Message::decode(&mut dhcproto::decoder::Decoder::new(dhcp_data)).ok()?;
 
-    if dhcp_data.len() < 240 {
+    // Only process BOOTREQUEST (client -> server)
+    if msg.opcode() != Opcode::BootRequest {
         return None;
     }
 
-    let op = dhcp_data[0];
-    if op != 1 {
-        // Not a request
+    // Only process ethernet (htype=Ethernet, hlen=6)
+    if msg.htype() != HType::Eth || msg.hlen() != 6 {
         return None;
     }
 
-    let htype = dhcp_data[1];
-    let hlen = dhcp_data[2];
-    if htype != 1 || hlen != 6 {
-        // Not ethernet
+    // Only process DHCP DISCOVER
+    let msg_type = msg.opts().msg_type()?;
+    if msg_type != MessageType::Discover {
         return None;
     }
 
-    let mac = format_mac(&dhcp_data[28..34]);
-    let (message_type, vendor_class, _user_class) = parse_dhcp_options(dhcp_data);
-
-    // Only process DHCP DISCOVER with PXE vendor class
-    if message_type != Some(DHCP_DISCOVER) {
+    // Only process PXE clients
+    if !is_pxe_client(&msg) {
         return None;
     }
 
-    if !is_pxe_request(&vendor_class) {
-        return None;
-    }
-
+    // Extract MAC address from chaddr field
+    let mac = format_mac(&msg.chaddr()[..6]);
     Some(mac)
 }
 
@@ -257,56 +190,39 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dhcproto::v4::DhcpOptions;
+    use dhcproto::Encodable;
 
-    // Helper to create a minimal DHCP packet
+    /// Helper to create a DHCP packet using dhcproto
+    /// Note: htype and hlen parameters are for testing edge cases;
+    /// for valid packets use HType::Eth and hlen=6
     fn create_dhcp_packet(
-        op: u8,
-        htype: u8,
-        hlen: u8,
+        opcode: Opcode,
+        htype: HType,
         mac: [u8; 6],
-        message_type: Option<u8>,
+        message_type: Option<MessageType>,
         vendor_class: Option<&str>,
         user_class: Option<&str>,
     ) -> Vec<u8> {
-        let mut packet = vec![0u8; 240];
+        let mut msg = Message::default();
+        msg.set_opcode(opcode).set_htype(htype).set_chaddr(&mac);
 
-        // Basic DHCP header
-        packet[0] = op; // op
-        packet[1] = htype; // htype
-        packet[2] = hlen; // hlen
-        // bytes 3-27 are zeros (hops, xid, secs, flags, addresses)
-
-        // MAC address at offset 28
-        packet[28..34].copy_from_slice(&mac);
-
-        // Magic cookie at offset 236
-        packet[236] = 99;
-        packet[237] = 130;
-        packet[238] = 83;
-        packet[239] = 99;
-
-        // Options start at 240
+        let mut opts = DhcpOptions::new();
         if let Some(mt) = message_type {
-            packet.push(DHCP_OPTION_MESSAGE_TYPE);
-            packet.push(1); // length
-            packet.push(mt);
+            opts.insert(DhcpOption::MessageType(mt));
         }
-
         if let Some(vc) = vendor_class {
-            packet.push(DHCP_OPTION_VENDOR_CLASS);
-            packet.push(vc.len() as u8);
-            packet.extend_from_slice(vc.as_bytes());
+            opts.insert(DhcpOption::ClassIdentifier(vc.as_bytes().to_vec()));
         }
-
         if let Some(uc) = user_class {
-            packet.push(DHCP_OPTION_USER_CLASS);
-            packet.push(uc.len() as u8);
-            packet.extend_from_slice(uc.as_bytes());
+            opts.insert(DhcpOption::UserClass(uc.as_bytes().to_vec()));
         }
+        msg.set_opts(opts);
 
-        packet.push(DHCP_OPTION_END);
-
-        packet
+        let mut buf = Vec::new();
+        msg.encode(&mut dhcproto::encoder::Encoder::new(&mut buf))
+            .unwrap();
+        buf
     }
 
     mod format_mac_tests {
@@ -325,121 +241,73 @@ mod tests {
         }
     }
 
-    mod parse_dhcp_options_tests {
+    mod is_pxe_client_tests {
         use super::*;
 
-        #[test]
-        fn parses_message_type() {
-            let packet = create_dhcp_packet(
-                1,
-                1,
-                6,
-                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
-                None,
-                None,
-            );
-            let (msg_type, _, _) = parse_dhcp_options(&packet);
-            assert_eq!(msg_type, Some(DHCP_DISCOVER));
+        fn create_msg_with_vendor_class(vendor_class: Option<&str>) -> Message {
+            let mut msg = Message::default();
+            if let Some(vc) = vendor_class {
+                let mut opts = DhcpOptions::new();
+                opts.insert(DhcpOption::ClassIdentifier(vc.as_bytes().to_vec()));
+                msg.set_opts(opts);
+            }
+            msg
         }
-
-        #[test]
-        fn parses_vendor_class() {
-            let packet = create_dhcp_packet(
-                1,
-                1,
-                6,
-                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
-                Some("PXEClient:Arch:00007"),
-                None,
-            );
-            let (_, vendor_class, _) = parse_dhcp_options(&packet);
-            assert_eq!(vendor_class, Some("PXEClient:Arch:00007".to_string()));
-        }
-
-        #[test]
-        fn parses_user_class_ipxe() {
-            let packet = create_dhcp_packet(
-                1,
-                1,
-                6,
-                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
-                Some("PXEClient:Arch:00007"),
-                Some("iPXE"),
-            );
-            let (_, _, user_class) = parse_dhcp_options(&packet);
-            assert_eq!(user_class, Some("iPXE".to_string()));
-        }
-
-        #[test]
-        fn returns_none_for_short_packet() {
-            let packet = vec![0u8; 100]; // Too short
-            let (msg_type, vendor_class, user_class) = parse_dhcp_options(&packet);
-            assert!(msg_type.is_none());
-            assert!(vendor_class.is_none());
-            assert!(user_class.is_none());
-        }
-
-        #[test]
-        fn returns_none_for_bad_magic_cookie() {
-            let mut packet = vec![0u8; 250];
-            // Wrong magic cookie
-            packet[236] = 0;
-            packet[237] = 0;
-            packet[238] = 0;
-            packet[239] = 0;
-            let (msg_type, _, _) = parse_dhcp_options(&packet);
-            assert!(msg_type.is_none());
-        }
-    }
-
-    mod is_pxe_request_tests {
-        use super::*;
 
         #[test]
         fn detects_pxe_client() {
-            let vc = Some("PXEClient:Arch:00007:UNDI:003016".to_string());
-            assert!(is_pxe_request(&vc));
+            let msg = create_msg_with_vendor_class(Some("PXEClient:Arch:00007:UNDI:003016"));
+            assert!(is_pxe_client(&msg));
         }
 
         #[test]
         fn rejects_non_pxe() {
-            let vc = Some("MSFT 5.0".to_string());
-            assert!(!is_pxe_request(&vc));
+            let msg = create_msg_with_vendor_class(Some("MSFT 5.0"));
+            assert!(!is_pxe_client(&msg));
         }
 
         #[test]
         fn rejects_none() {
-            assert!(!is_pxe_request(&None));
+            let msg = create_msg_with_vendor_class(None);
+            assert!(!is_pxe_client(&msg));
         }
     }
 
-    mod is_ipxe_request_tests {
+    mod is_ipxe_client_tests {
         use super::*;
+
+        fn create_msg_with_user_class(user_class: Option<&str>) -> Message {
+            let mut msg = Message::default();
+            if let Some(uc) = user_class {
+                let mut opts = DhcpOptions::new();
+                opts.insert(DhcpOption::UserClass(uc.as_bytes().to_vec()));
+                msg.set_opts(opts);
+            }
+            msg
+        }
 
         #[test]
         fn detects_ipxe() {
-            let uc = Some("iPXE".to_string());
-            assert!(is_ipxe_request(&uc));
+            let msg = create_msg_with_user_class(Some("iPXE"));
+            assert!(is_ipxe_client(&msg));
         }
 
         #[test]
         fn detects_ipxe_in_longer_string() {
-            let uc = Some("iPXE/1.0.0".to_string());
-            assert!(is_ipxe_request(&uc));
+            let msg = create_msg_with_user_class(Some("iPXE/1.0.0"));
+            assert!(is_ipxe_client(&msg));
         }
 
         #[test]
         fn rejects_non_ipxe() {
-            let uc = Some("PXEClient".to_string());
-            assert!(!is_ipxe_request(&uc));
+            let msg = create_msg_with_user_class(Some("PXEClient"));
+            assert!(!is_ipxe_client(&msg));
         }
 
         #[test]
         fn rejects_none() {
-            assert!(!is_ipxe_request(&None));
+            let msg = create_msg_with_user_class(None);
+            assert!(!is_ipxe_client(&msg));
         }
     }
 
@@ -449,11 +317,10 @@ mod tests {
         #[test]
         fn accepts_pxe_discover() {
             let packet = create_dhcp_packet(
-                1, // BOOTREQUEST
-                1, // Ethernet
-                6, // MAC length
+                Opcode::BootRequest,
+                HType::Eth, // Ethernet
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
+                Some(MessageType::Discover),
                 Some("PXEClient:Arch:00007"),
                 None,
             );
@@ -464,11 +331,10 @@ mod tests {
         #[test]
         fn rejects_non_pxe_discover() {
             let packet = create_dhcp_packet(
-                1,
-                1,
-                6,
+                Opcode::BootRequest,
+                HType::Eth,
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
+                Some(MessageType::Discover),
                 Some("MSFT 5.0"), // Not PXE
                 None,
             );
@@ -479,11 +345,10 @@ mod tests {
         #[test]
         fn rejects_dhcp_request() {
             let packet = create_dhcp_packet(
-                1,
-                1,
-                6,
+                Opcode::BootRequest,
+                HType::Eth,
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_REQUEST), // Not DISCOVER
+                Some(MessageType::Request), // Not DISCOVER
                 Some("PXEClient:Arch:00007"),
                 None,
             );
@@ -494,11 +359,10 @@ mod tests {
         #[test]
         fn rejects_reply_packets() {
             let packet = create_dhcp_packet(
-                2, // BOOTREPLY, not BOOTREQUEST
-                1,
-                6,
+                Opcode::BootReply, // BOOTREPLY, not BOOTREQUEST
+                HType::Eth,
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
+                Some(MessageType::Discover),
                 Some("PXEClient:Arch:00007"),
                 None,
             );
@@ -509,11 +373,10 @@ mod tests {
         #[test]
         fn rejects_non_ethernet() {
             let packet = create_dhcp_packet(
-                1,
-                6, // Not ethernet (6 = IEEE 802)
-                6,
+                Opcode::BootRequest,
+                HType::Unknown(6), // Not ethernet (6 = IEEE 802)
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_DISCOVER),
+                Some(MessageType::Discover),
                 Some("PXEClient:Arch:00007"),
                 None,
             );
@@ -535,19 +398,19 @@ mod tests {
         #[test]
         fn discover_is_one() {
             // RFC 2132 defines DHCPDISCOVER as 1
-            assert_eq!(DHCP_DISCOVER, 1);
+            assert_eq!(u8::from(MessageType::Discover), 1);
         }
 
         #[test]
         fn offer_is_two() {
             // RFC 2132 defines DHCPOFFER as 2
-            assert_eq!(DHCP_OFFER, 2);
+            assert_eq!(u8::from(MessageType::Offer), 2);
         }
 
         #[test]
         fn request_is_three() {
             // RFC 2132 defines DHCPREQUEST as 3
-            assert_eq!(DHCP_REQUEST, 3);
+            assert_eq!(u8::from(MessageType::Request), 3);
         }
     }
 }

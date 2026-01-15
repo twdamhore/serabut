@@ -31,12 +31,17 @@ thiserror = "1"
 # Serialization (for potential future config)
 serde = { version = "1", features = ["derive"] }
 
-# Network packet handling (for DHCP)
+# Network packet handling (for raw packet capture)
 pnet = "0.35"
 
-# File locking (Unix)
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# DHCP protocol parsing
+dhcproto = "0.12"
+
+# MAC address handling
+macaddr = "1"
+
+# File locking (cross-platform)
+file-lock = "2"
 
 [dev-dependencies]
 tempfile = "3"
