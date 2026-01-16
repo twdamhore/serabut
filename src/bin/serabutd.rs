@@ -306,10 +306,9 @@ fn send_dhcp_response_raw(
         udp.set_checksum(0);
     }
 
-    // Compute UDP checksum over the entire UDP segment
-    let udp_checksum_val = udp_checksum(src_ip, dst_ip, &buffer[udp_start..]);
-    buffer[udp_start + 6] = (udp_checksum_val >> 8) as u8;
-    buffer[udp_start + 7] = (udp_checksum_val & 0xff) as u8;
+    // UDP checksum is optional for IPv4 (RFC 768)
+    // Setting to 0 disables checksum validation, avoiding offload issues
+    // The checksum field is already 0 from set_checksum(0) above
 
     // Send the packet
     tx.send_to(&buffer, None)
