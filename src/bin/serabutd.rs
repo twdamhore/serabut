@@ -587,15 +587,16 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
                     == pnet::packet::ip::IpNextHeaderProtocols::Udp
                 {
                     if let Some(udp) = UdpPacket::new(ipv4.payload()) {
+                        let src_port = udp.get_source();
                         let dst_port = udp.get_destination();
-                        // Check for DHCP (port 67) or ProxyDHCP (port 4011)
-                        if udp.get_source() == DHCP_CLIENT_PORT
-                            && (dst_port == DHCP_SERVER_PORT || dst_port == PXE_PROXY_PORT)
-                        {
+                        // Check for DHCP (68->67) or ProxyDHCP (4011->4011)
+                        let is_dhcp = src_port == DHCP_CLIENT_PORT && dst_port == DHCP_SERVER_PORT;
+                        let is_proxy = src_port == PXE_PROXY_PORT && dst_port == PXE_PROXY_PORT;
+                        if is_dhcp || is_proxy {
                             let dhcp_data = udp.payload().to_vec();
                             if let Some(mut request) = handle_dhcp_packet(&dhcp_data) {
                                 // Track if this is a ProxyDHCP request (port 4011)
-                                request.is_proxy_request = dst_port == PXE_PROXY_PORT;
+                                request.is_proxy_request = is_proxy;
                                 return Some(ProcessedPacket { request, dhcp_data });
                             }
                         }
@@ -639,7 +640,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix proxy-dhcp-port-4011: attempt #6]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix proxy-dhcp-4011-filter: attempt #7]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
