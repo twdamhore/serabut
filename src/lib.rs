@@ -330,6 +330,141 @@ pub fn profile_exists(name: &str) -> bool {
     path.exists()
 }
 
+/// Read the content of a profile
+pub fn read_profile(name: &str) -> Result<String> {
+    let path = profiles_dir().join(format!("{}.ipxe", name));
+    fs::read_to_string(&path).context(format!("Failed to read profile '{}'", name))
+}
+
+// ============================================================================
+// Boot Entries (boot.txt)
+// ============================================================================
+
+#[derive(Debug, Clone)]
+pub struct BootEntry {
+    pub mac: String,
+    pub profile: String,
+    pub assigned_at: DateTime<Utc>,
+}
+
+impl BootEntry {
+    pub fn new(mac: String, profile: String) -> Self {
+        Self {
+            mac: normalize_mac(&mac),
+            profile,
+            assigned_at: Utc::now(),
+        }
+    }
+
+    /// Parse a BootEntry from a CSV line.
+    /// Format: mac,profile,timestamp
+    pub fn from_csv_line(line: &str) -> Result<Self> {
+        let parts: Vec<&str> = line.split(',').collect();
+        if parts.len() != 3 {
+            return Err(anyhow!("Invalid boot CSV line: {}", line));
+        }
+
+        let assigned_at = DateTime::parse_from_rfc3339(parts[2])
+            .context("Invalid timestamp")?
+            .with_timezone(&Utc);
+
+        Ok(Self {
+            mac: parts[0].to_string(),
+            profile: parts[1].to_string(),
+            assigned_at,
+        })
+    }
+
+    pub fn to_csv_line(&self) -> String {
+        format!(
+            "{},{},{}",
+            self.mac,
+            self.profile,
+            self.assigned_at.to_rfc3339()
+        )
+    }
+}
+
+/// Read boot entries from the boot.txt file
+pub fn read_boot_entries() -> Result<Vec<BootEntry>> {
+    let path = boot_file_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = File::open(&path).context("Failed to open boot.txt")?;
+    let reader = BufReader::new(file);
+    let mut entries = Vec::new();
+
+    for line in reader.lines() {
+        let line = line.context("Failed to read line")?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        entries.push(BootEntry::from_csv_line(line)?);
+    }
+
+    Ok(entries)
+}
+
+/// Write boot entries to the boot.txt file
+pub fn write_boot_entries(entries: &[BootEntry]) -> Result<()> {
+    ensure_data_dir()?;
+
+    let path = boot_file_path();
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .context("Failed to open boot.txt for writing")?;
+
+    lock_file_exclusive(&file)?;
+
+    let mut writer = std::io::BufWriter::new(&file);
+    for entry in entries {
+        writeln!(writer, "{}", entry.to_csv_line())?;
+    }
+    writer.flush()?;
+
+    unlock_file(&file)?;
+
+    Ok(())
+}
+
+pub fn find_boot_by_mac(entries: &[BootEntry], mac: &str) -> Option<usize> {
+    let mac = normalize_mac(mac);
+    entries.iter().position(|e| e.mac == mac)
+}
+
+/// Resolve a target (MAC address or label) to a MAC address.
+/// Returns the MAC address if found, or an error if not found.
+pub fn resolve_target(target: &str) -> Result<String> {
+    // First, check if it's a valid MAC address
+    if validate_mac(target).is_ok() {
+        let mac = normalize_mac(target);
+        // Verify it exists in mac.txt
+        let entries = read_mac_entries()?;
+        if find_entry_by_mac(&entries, &mac).is_some() {
+            return Ok(mac);
+        }
+        return Err(SerabutError::MacNotFound(mac).into());
+    }
+
+    // Otherwise, treat it as a label
+    let entries = read_mac_entries()?;
+    if let Some(idx) = find_entry_by_label(&entries, target) {
+        return Ok(entries[idx].mac.clone());
+    }
+
+    // Not a valid MAC and not a known label
+    Err(anyhow!(
+        "'{}' is not a valid MAC address or known label",
+        target
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,6 +812,189 @@ mod tests {
 
             assert!(profile_exists("ubuntu"));
             assert!(!profile_exists("nonexistent"));
+        }
+    }
+
+    mod boot_entry_tests {
+        use super::*;
+
+        #[test]
+        fn new_entry_normalizes_mac() {
+            let entry = BootEntry::new("AA:BB:CC:DD:EE:FF".to_string(), "ubuntu".to_string());
+            assert_eq!(entry.mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(entry.profile, "ubuntu");
+        }
+
+        #[test]
+        fn from_csv_line_valid() {
+            let entry =
+                BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00")
+                    .unwrap();
+            assert_eq!(entry.mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(entry.profile, "ubuntu");
+        }
+
+        #[test]
+        fn from_csv_line_invalid_too_few_fields() {
+            assert!(BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu").is_err());
+        }
+
+        #[test]
+        fn from_csv_line_invalid_timestamp() {
+            assert!(BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu,not-a-timestamp").is_err());
+        }
+
+        #[test]
+        fn to_csv_line_roundtrip() {
+            let original =
+                BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00")
+                    .unwrap();
+            let csv = original.to_csv_line();
+            let parsed = BootEntry::from_csv_line(&csv).unwrap();
+            assert_eq!(original.mac, parsed.mac);
+            assert_eq!(original.profile, parsed.profile);
+            assert_eq!(original.assigned_at, parsed.assigned_at);
+        }
+    }
+
+    mod boot_io_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn write_and_read_boot_entries() {
+            let _temp = setup_test_env();
+
+            let entries = vec![
+                BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00")
+                    .unwrap(),
+                BootEntry::from_csv_line("11:22:33:44:55:66,rocky,2026-01-15T13:00:00+00:00")
+                    .unwrap(),
+            ];
+
+            write_boot_entries(&entries).unwrap();
+            let read_entries = read_boot_entries().unwrap();
+
+            assert_eq!(read_entries.len(), 2);
+            assert_eq!(read_entries[0].mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(read_entries[0].profile, "ubuntu");
+            assert_eq!(read_entries[1].mac, "11:22:33:44:55:66");
+            assert_eq!(read_entries[1].profile, "rocky");
+        }
+
+        #[test]
+        #[serial]
+        fn read_nonexistent_boot_file_returns_empty() {
+            let _temp = setup_test_env();
+            let entries = read_boot_entries().unwrap();
+            assert!(entries.is_empty());
+        }
+
+        #[test]
+        #[serial]
+        fn find_boot_by_mac_exists() {
+            let entries = vec![
+                BootEntry::from_csv_line("aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00")
+                    .unwrap(),
+                BootEntry::from_csv_line("11:22:33:44:55:66,rocky,2026-01-15T13:00:00+00:00")
+                    .unwrap(),
+            ];
+            assert_eq!(find_boot_by_mac(&entries, "aa:bb:cc:dd:ee:ff"), Some(0));
+            assert_eq!(find_boot_by_mac(&entries, "11:22:33:44:55:66"), Some(1));
+        }
+
+        #[test]
+        #[serial]
+        fn find_boot_by_mac_case_insensitive() {
+            let entries = vec![BootEntry::from_csv_line(
+                "aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00",
+            )
+            .unwrap()];
+            assert_eq!(find_boot_by_mac(&entries, "AA:BB:CC:DD:EE:FF"), Some(0));
+        }
+
+        #[test]
+        #[serial]
+        fn find_boot_by_mac_not_found() {
+            let entries = vec![BootEntry::from_csv_line(
+                "aa:bb:cc:dd:ee:ff,ubuntu,2026-01-15T12:00:00+00:00",
+            )
+            .unwrap()];
+            assert_eq!(find_boot_by_mac(&entries, "00:00:00:00:00:00"), None);
+        }
+    }
+
+    mod resolve_target_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn resolve_mac_address() {
+            let _temp = setup_test_env();
+
+            // Create a MAC entry
+            let entries = vec![MacEntry::from_csv_line(
+                "node,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00",
+            )
+            .unwrap()];
+            write_mac_entries(&entries).unwrap();
+
+            let result = resolve_target("aa:bb:cc:dd:ee:ff").unwrap();
+            assert_eq!(result, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        #[serial]
+        fn resolve_mac_address_uppercase() {
+            let _temp = setup_test_env();
+
+            let entries = vec![MacEntry::from_csv_line(
+                "node,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00",
+            )
+            .unwrap()];
+            write_mac_entries(&entries).unwrap();
+
+            let result = resolve_target("AA:BB:CC:DD:EE:FF").unwrap();
+            assert_eq!(result, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        #[serial]
+        fn resolve_label() {
+            let _temp = setup_test_env();
+
+            let entries = vec![MacEntry::from_csv_line(
+                "mynode,aa:bb:cc:dd:ee:ff,2026-01-15T12:00:00+00:00",
+            )
+            .unwrap()];
+            write_mac_entries(&entries).unwrap();
+
+            let result = resolve_target("mynode").unwrap();
+            assert_eq!(result, "aa:bb:cc:dd:ee:ff");
+        }
+
+        #[test]
+        #[serial]
+        fn resolve_unknown_mac_fails() {
+            let _temp = setup_test_env();
+
+            let entries: Vec<MacEntry> = vec![];
+            write_mac_entries(&entries).unwrap();
+
+            let result = resolve_target("aa:bb:cc:dd:ee:ff");
+            assert!(result.is_err());
+        }
+
+        #[test]
+        #[serial]
+        fn resolve_unknown_label_fails() {
+            let _temp = setup_test_env();
+
+            let entries: Vec<MacEntry> = vec![];
+            write_mac_entries(&entries).unwrap();
+
+            let result = resolve_target("nonexistent");
+            assert!(result.is_err());
         }
     }
 }
