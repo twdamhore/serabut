@@ -102,7 +102,10 @@ fn build_dhcp_offer(
     // Copy XID from request (bytes 4-7)
     response[4..8].copy_from_slice(&request[4..8]);
 
-    // secs = 0, flags = 0 (bytes 8-11)
+    // secs = 0 (bytes 8-9), copy flags from request (bytes 10-11)
+    // The broadcast flag (0x8000) must be preserved - UEFI PXE requires this
+    response[10..12].copy_from_slice(&request[10..12]);
+
     // ciaddr = 0 (bytes 12-15) - client doesn't have IP yet
     // yiaddr = 0 (bytes 16-19) - ProxyDHCP doesn't assign IP
     // siaddr = our IP (bytes 20-23) - TFTP server
