@@ -1,18 +1,19 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use pnet::datalink::{self, Channel::Ethernet, NetworkInterface};
-use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
-use pnet::packet::ipv4::Ipv4Packet;
-use pnet::packet::udp::UdpPacket;
+use pnet::datalink::{self, Channel::Ethernet, DataLinkSender, NetworkInterface};
+use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet, checksum as ipv4_checksum};
+use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
 use pnet::packet::Packet;
+use pnet::util::MacAddr;
 use serabut::{
     ensure_data_dir, find_boot_by_mac, normalize_mac, read_boot_entries, read_mac_entries,
     read_profile, update_or_insert_mac, write_boot_entries, write_mac_entries,
 };
-use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{BufRead, BufReader, Write};
-use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
-use std::os::unix::io::AsRawFd;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 const DHCP_SERVER_PORT: u16 = 67;
@@ -203,12 +204,129 @@ fn build_dhcp_ack(
     response
 }
 
-/// Send a DHCP response via UDP broadcast
-fn send_dhcp_response(socket: &UdpSocket, response: &[u8]) -> Result<()> {
-    // ProxyDHCP responses are sent to broadcast on port 68
-    let dest = SocketAddr::from(([255, 255, 255, 255], DHCP_CLIENT_PORT));
-    socket.send_to(response, dest)?;
+/// Compute UDP checksum with pseudo-header
+fn udp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_packet: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    // Pseudo-header: src IP
+    let src = src_ip.octets();
+    sum += u16::from_be_bytes([src[0], src[1]]) as u32;
+    sum += u16::from_be_bytes([src[2], src[3]]) as u32;
+
+    // Pseudo-header: dst IP
+    let dst = dst_ip.octets();
+    sum += u16::from_be_bytes([dst[0], dst[1]]) as u32;
+    sum += u16::from_be_bytes([dst[2], dst[3]]) as u32;
+
+    // Pseudo-header: protocol (UDP = 17)
+    sum += 17u32;
+
+    // Pseudo-header: UDP length
+    sum += udp_packet.len() as u32;
+
+    // UDP header + data
+    let mut i = 0;
+    while i + 1 < udp_packet.len() {
+        sum += u16::from_be_bytes([udp_packet[i], udp_packet[i + 1]]) as u32;
+        i += 2;
+    }
+    // Handle odd byte
+    if i < udp_packet.len() {
+        sum += (udp_packet[i] as u32) << 8;
+    }
+
+    // Fold 32-bit sum to 16 bits
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+
+    // One's complement
+    let result = !sum as u16;
+    if result == 0 { 0xffff } else { result }
+}
+
+/// Build and send a raw Ethernet frame with DHCP response
+fn send_dhcp_response_raw(
+    tx: &mut Box<dyn DataLinkSender>,
+    src_mac: MacAddr,
+    src_ip: Ipv4Addr,
+    dhcp_payload: &[u8],
+) -> Result<()> {
+    let dst_mac = MacAddr::broadcast();
+    let dst_ip = Ipv4Addr::new(255, 255, 255, 255);
+
+    // Calculate sizes
+    let udp_len = 8 + dhcp_payload.len();
+    let ip_len = 20 + udp_len;
+    let total_len = 14 + ip_len; // Ethernet header + IP packet
+
+    let mut buffer = vec![0u8; total_len];
+
+    // Build Ethernet header
+    {
+        let mut eth = MutableEthernetPacket::new(&mut buffer[0..14])
+            .ok_or_else(|| anyhow::anyhow!("Failed to create Ethernet packet"))?;
+        eth.set_destination(dst_mac);
+        eth.set_source(src_mac);
+        eth.set_ethertype(EtherTypes::Ipv4);
+    }
+
+    // Build IP header
+    {
+        let mut ip = MutableIpv4Packet::new(&mut buffer[14..14 + 20])
+            .ok_or_else(|| anyhow::anyhow!("Failed to create IP packet"))?;
+        ip.set_version(4);
+        ip.set_header_length(5); // 20 bytes / 4
+        ip.set_dscp(0);
+        ip.set_ecn(0);
+        ip.set_total_length(ip_len as u16);
+        ip.set_identification(rand_id());
+        ip.set_flags(0);
+        ip.set_fragment_offset(0);
+        ip.set_ttl(64);
+        ip.set_next_level_protocol(IpNextHeaderProtocols::Udp);
+        ip.set_source(src_ip);
+        ip.set_destination(dst_ip);
+        ip.set_checksum(0);
+        let checksum = ipv4_checksum(&ip.to_immutable());
+        ip.set_checksum(checksum);
+    }
+
+    // Build UDP header and payload
+    let udp_start = 14 + 20;
+    {
+        // Copy payload first
+        buffer[udp_start + 8..udp_start + 8 + dhcp_payload.len()].copy_from_slice(dhcp_payload);
+
+        let mut udp = MutableUdpPacket::new(&mut buffer[udp_start..udp_start + udp_len])
+            .ok_or_else(|| anyhow::anyhow!("Failed to create UDP packet"))?;
+        udp.set_source(DHCP_SERVER_PORT);
+        udp.set_destination(DHCP_CLIENT_PORT);
+        udp.set_length(udp_len as u16);
+        udp.set_checksum(0);
+    }
+
+    // Compute UDP checksum over the entire UDP segment
+    let udp_checksum_val = udp_checksum(src_ip, dst_ip, &buffer[udp_start..]);
+    buffer[udp_start + 6] = (udp_checksum_val >> 8) as u8;
+    buffer[udp_start + 7] = (udp_checksum_val & 0xff) as u8;
+
+    // Send the packet
+    tx.send_to(&buffer, None)
+        .ok_or_else(|| anyhow::anyhow!("Failed to send packet"))?
+        .map_err(|e| anyhow::anyhow!("Send error: {}", e))?;
+
     Ok(())
+}
+
+/// Generate a random IP identification number
+fn rand_id() -> u16 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    (nanos & 0xffff) as u16
 }
 
 // ============================================================================
@@ -581,55 +699,17 @@ fn run_listener(args: &Args) -> Result<()> {
 
     eprintln!("Listening for PXE boot requests...");
 
-    // Create UDP socket for sending ProxyDHCP responses on port 67
-    // Use SO_BINDTODEVICE to bind to specific interface, avoiding conflicts with
-    // other DHCP services on different interfaces (e.g., libvirt/dnsmasq)
-    let response_socket = if config.respond {
-        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-            .context("Failed to create UDP socket")?;
+    // Get interface MAC address
+    let src_mac = interface
+        .mac
+        .ok_or_else(|| anyhow::anyhow!("Interface '{}' has no MAC address", interface.name))?;
+    eprintln!("Interface MAC: {}", src_mac);
 
-        // Bind socket to specific interface using SO_BINDTODEVICE
-        // This must be done BEFORE bind() to avoid conflicts
-        let iface_name = config.interface_name.as_bytes();
-        let ret = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_BINDTODEVICE,
-                iface_name.as_ptr() as *const libc::c_void,
-                iface_name.len() as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            return Err(anyhow::anyhow!(
-                "Failed to bind socket to interface '{}': {}. Requires root/CAP_NET_RAW.",
-                config.interface_name,
-                std::io::Error::last_os_error()
-            ));
-        }
-
-        // Now bind to the address
-        let bind_addr: SocketAddr = SocketAddr::new(config.server_ip.into(), DHCP_SERVER_PORT);
-        socket.bind(&bind_addr.into()).context(format!(
-            "Failed to bind ProxyDHCP socket to {}:{}",
-            config.server_ip, DHCP_SERVER_PORT
-        ))?;
-
-        socket.set_broadcast(true)?;
-
-        // Convert to std UdpSocket
-        let std_socket: UdpSocket = socket.into();
-        eprintln!(
-            "ProxyDHCP bound to {}:{} on {}",
-            config.server_ip, DHCP_SERVER_PORT, config.interface_name
-        );
-        Some(std_socket)
-    } else {
-        None
-    };
-
-    let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
-        Ok(Ethernet(_tx, rx)) => ((), rx),
+    // Create datalink channel for raw packet I/O
+    // Using raw packets allows us to compute checksums in software,
+    // avoiding issues with checksum offload on virtual bridges
+    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
+        Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => return Err(anyhow::anyhow!("Unhandled channel type")),
         Err(e) => {
             return Err(anyhow::anyhow!(
@@ -638,6 +718,9 @@ fn run_listener(args: &Args) -> Result<()> {
             ))
         }
     };
+
+    // Wrap tx in Arc<Mutex> for use in the main loop
+    let tx = Arc::new(Mutex::new(tx));
 
     loop {
         match rx.next() {
@@ -671,7 +754,7 @@ fn run_listener(args: &Args) -> Result<()> {
                         }
 
                         // Send ProxyDHCP response if enabled
-                        if let Some(ref socket) = response_socket {
+                        if config.respond {
                             let response = match req.message_type {
                                 DHCP_DISCOVER => {
                                     build_dhcp_offer(&processed.dhcp_data, &config, req.is_ipxe)
@@ -688,7 +771,14 @@ fn run_listener(args: &Args) -> Result<()> {
                                 "ACK"
                             };
 
-                            match send_dhcp_response(socket, &response) {
+                            // Send raw packet with proper checksums
+                            let mut tx_guard = tx.lock().unwrap();
+                            match send_dhcp_response_raw(
+                                &mut *tx_guard,
+                                src_mac,
+                                config.server_ip,
+                                &response,
+                            ) {
                                 Ok(_) => {
                                     if req.is_ipxe {
                                         eprintln!(
