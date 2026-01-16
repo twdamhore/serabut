@@ -15,7 +15,6 @@ use std::thread;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
-const PROXY_DHCP_PORT: u16 = 4011; // Standard ProxyDHCP port
 
 // DHCP message types
 const DHCP_DISCOVER: u8 = 1;
@@ -575,12 +574,13 @@ fn run_listener(args: &Args) -> Result<()> {
 
     eprintln!("Listening for PXE boot requests...");
 
-    // Create UDP socket for sending ProxyDHCP responses on port 4011
+    // Create UDP socket for sending ProxyDHCP responses on port 67
+    // Since the real DHCP server is on a different host, we can bind to port 67 here
     let response_socket = if config.respond {
-        let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], PROXY_DHCP_PORT)))
-            .context(format!("Failed to bind ProxyDHCP socket to port {}. Is another service using it?", PROXY_DHCP_PORT))?;
+        let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], DHCP_SERVER_PORT)))
+            .context(format!("Failed to bind ProxyDHCP socket to port {}. Is another DHCP service running on this host?", DHCP_SERVER_PORT))?;
         socket.set_broadcast(true)?;
-        eprintln!("ProxyDHCP bound to port {}", PROXY_DHCP_PORT);
+        eprintln!("ProxyDHCP bound to port {}", DHCP_SERVER_PORT);
         Some(socket)
     } else {
         None
