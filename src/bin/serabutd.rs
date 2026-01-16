@@ -675,7 +675,7 @@ fn run_listener(args: &Args) -> Result<()> {
         interface_name: interface.name.clone(),
     };
 
-    eprintln!("serabutd starting on interface: {} [xxyy: attempt #5]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix raw-pkt-udp-cksum-zero: attempt #5]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
