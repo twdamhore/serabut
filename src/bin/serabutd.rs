@@ -9,8 +9,10 @@ use serabut::{
     ensure_data_dir, find_boot_by_mac, normalize_mac, read_boot_entries, read_mac_entries,
     read_profile, update_or_insert_mac, write_boot_entries, write_mac_entries,
 };
+use socket2::{Domain, Protocol, Socket, Type};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::os::unix::io::AsRawFd;
 use std::thread;
 
 const DHCP_SERVER_PORT: u16 = 67;
@@ -62,6 +64,7 @@ struct ServerConfig {
     http_port: u16,
     boot_file: String,
     respond: bool,
+    interface_name: String,
 }
 
 fn format_mac(bytes: &[u8]) -> String {
@@ -549,6 +552,7 @@ fn run_listener(args: &Args) -> Result<()> {
         http_port: args.http_port,
         boot_file: args.boot_file.clone(),
         respond: !args.no_respond,
+        interface_name: interface.name.clone(),
     };
 
     eprintln!("serabutd starting on interface: {}", interface.name);
@@ -575,14 +579,48 @@ fn run_listener(args: &Args) -> Result<()> {
     eprintln!("Listening for PXE boot requests...");
 
     // Create UDP socket for sending ProxyDHCP responses on port 67
-    // Bind to the specific interface IP to avoid conflicts with other DHCP services
+    // Use SO_BINDTODEVICE to bind to specific interface, avoiding conflicts with
+    // other DHCP services on different interfaces (e.g., libvirt/dnsmasq)
     let response_socket = if config.respond {
-        let bind_addr = SocketAddr::new(config.server_ip.into(), DHCP_SERVER_PORT);
-        let socket = UdpSocket::bind(bind_addr)
-            .context(format!("Failed to bind ProxyDHCP socket to {}:{}", config.server_ip, DHCP_SERVER_PORT))?;
+        let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+            .context("Failed to create UDP socket")?;
+
+        // Bind socket to specific interface using SO_BINDTODEVICE
+        // This must be done BEFORE bind() to avoid conflicts
+        let iface_name = config.interface_name.as_bytes();
+        let ret = unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                iface_name.as_ptr() as *const libc::c_void,
+                iface_name.len() as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            return Err(anyhow::anyhow!(
+                "Failed to bind socket to interface '{}': {}. Requires root/CAP_NET_RAW.",
+                config.interface_name,
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        // Now bind to the address
+        let bind_addr: SocketAddr = SocketAddr::new(config.server_ip.into(), DHCP_SERVER_PORT);
+        socket.bind(&bind_addr.into()).context(format!(
+            "Failed to bind ProxyDHCP socket to {}:{}",
+            config.server_ip, DHCP_SERVER_PORT
+        ))?;
+
         socket.set_broadcast(true)?;
-        eprintln!("ProxyDHCP bound to {}:{}", config.server_ip, DHCP_SERVER_PORT);
-        Some(socket)
+
+        // Convert to std UdpSocket
+        let std_socket: UdpSocket = socket.into();
+        eprintln!(
+            "ProxyDHCP bound to {}:{} on {}",
+            config.server_ip, DHCP_SERVER_PORT, config.interface_name
+        );
+        Some(std_socket)
     } else {
         None
     };
