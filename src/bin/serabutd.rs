@@ -4,7 +4,7 @@ use pnet::datalink::{self, Channel::Ethernet, DataLinkSender, NetworkInterface};
 use pnet::packet::ethernet::{EtherTypes, EthernetPacket, MutableEthernetPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::ipv4::{Ipv4Packet, MutableIpv4Packet, checksum as ipv4_checksum};
-use pnet::packet::udp::{MutableUdpPacket, UdpPacket};
+use pnet::packet::udp::{MutableUdpPacket, UdpPacket, ipv4_checksum as udp_checksum};
 use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use serabut::{
@@ -269,12 +269,10 @@ fn send_dhcp_response_raw(
         udp.set_source(src_port);
         udp.set_destination(dst_port);
         udp.set_length(udp_len as u16);
-        udp.set_checksum(0);
+        // Compute proper UDP checksum (some PXE ROMs may require it)
+        let checksum = udp_checksum(&udp.to_immutable(), &src_ip, &dst_ip);
+        udp.set_checksum(checksum);
     }
-
-    // UDP checksum is optional for IPv4 (RFC 768)
-    // Setting to 0 disables checksum validation, avoiding offload issues
-    // The checksum field is already 0 from set_checksum(0) above
 
     // Send the packet
     tx.send_to(&buffer, None)
@@ -657,7 +655,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix dst-port-68: attempt #12]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix udp-checksum: attempt #13]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
