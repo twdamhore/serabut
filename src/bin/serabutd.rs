@@ -575,12 +575,13 @@ fn run_listener(args: &Args) -> Result<()> {
     eprintln!("Listening for PXE boot requests...");
 
     // Create UDP socket for sending ProxyDHCP responses on port 67
-    // Since the real DHCP server is on a different host, we can bind to port 67 here
+    // Bind to the specific interface IP to avoid conflicts with other DHCP services
     let response_socket = if config.respond {
-        let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], DHCP_SERVER_PORT)))
-            .context(format!("Failed to bind ProxyDHCP socket to port {}. Is another DHCP service running on this host?", DHCP_SERVER_PORT))?;
+        let bind_addr = SocketAddr::new(config.server_ip.into(), DHCP_SERVER_PORT);
+        let socket = UdpSocket::bind(bind_addr)
+            .context(format!("Failed to bind ProxyDHCP socket to {}:{}", config.server_ip, DHCP_SERVER_PORT))?;
         socket.set_broadcast(true)?;
-        eprintln!("ProxyDHCP bound to port {}", DHCP_SERVER_PORT);
+        eprintln!("ProxyDHCP bound to {}:{}", config.server_ip, DHCP_SERVER_PORT);
         Some(socket)
     } else {
         None
