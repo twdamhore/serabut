@@ -18,6 +18,7 @@ use std::thread;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
+const PXE_PROXY_PORT: u16 = 4011;
 
 // DHCP message types
 const DHCP_DISCOVER: u8 = 1;
@@ -209,6 +210,7 @@ fn send_dhcp_response_raw(
     src_mac: MacAddr,
     src_ip: Ipv4Addr,
     dhcp_payload: &[u8],
+    src_port: u16, // 67 for regular DHCP, 4011 for ProxyDHCP
 ) -> Result<()> {
     let dst_mac = MacAddr::broadcast();
     let dst_ip = Ipv4Addr::new(255, 255, 255, 255);
@@ -258,7 +260,7 @@ fn send_dhcp_response_raw(
 
         let mut udp = MutableUdpPacket::new(&mut buffer[udp_start..udp_start + udp_len])
             .ok_or_else(|| anyhow::anyhow!("Failed to create UDP packet"))?;
-        udp.set_source(DHCP_SERVER_PORT);
+        udp.set_source(src_port);
         udp.set_destination(DHCP_CLIENT_PORT);
         udp.set_length(udp_len as u16);
         udp.set_checksum(0);
@@ -512,6 +514,7 @@ struct PxeRequest {
     mac: String,
     message_type: u8,
     is_ipxe: bool,
+    is_proxy_request: bool, // True if request came to port 4011
 }
 
 fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<PxeRequest> {
@@ -565,6 +568,7 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<PxeRequest> {
         mac,
         message_type: msg_type,
         is_ipxe,
+        is_proxy_request: false, // Set later based on destination port
     })
 }
 
@@ -583,12 +587,15 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
                     == pnet::packet::ip::IpNextHeaderProtocols::Udp
                 {
                     if let Some(udp) = UdpPacket::new(ipv4.payload()) {
-                        // Check for DHCP (client port 68 -> server port 67)
+                        let dst_port = udp.get_destination();
+                        // Check for DHCP (port 67) or ProxyDHCP (port 4011)
                         if udp.get_source() == DHCP_CLIENT_PORT
-                            && udp.get_destination() == DHCP_SERVER_PORT
+                            && (dst_port == DHCP_SERVER_PORT || dst_port == PXE_PROXY_PORT)
                         {
                             let dhcp_data = udp.payload().to_vec();
-                            if let Some(request) = handle_dhcp_packet(&dhcp_data) {
+                            if let Some(mut request) = handle_dhcp_packet(&dhcp_data) {
+                                // Track if this is a ProxyDHCP request (port 4011)
+                                request.is_proxy_request = dst_port == PXE_PROXY_PORT;
                                 return Some(ProcessedPacket { request, dhcp_data });
                             }
                         }
@@ -632,7 +639,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix raw-pkt-udp-cksum-zero: attempt #5]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix proxy-dhcp-port-4011: attempt #6]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
@@ -711,20 +718,27 @@ fn run_listener(args: &Args) -> Result<()> {
 
                         // Send ProxyDHCP response if enabled
                         if config.respond {
+                            // For DISCOVER: always respond with OFFER
+                            // For REQUEST: only respond if it's a ProxyDHCP request (port 4011)
                             let response = match req.message_type {
                                 DHCP_DISCOVER => {
                                     build_dhcp_offer(&processed.dhcp_data, &config, req.is_ipxe)
                                 }
-                                DHCP_REQUEST => {
+                                DHCP_REQUEST if req.is_proxy_request => {
+                                    // Only respond to REQUESTs on port 4011
                                     build_dhcp_ack(&processed.dhcp_data, &config, req.is_ipxe)
+                                }
+                                DHCP_REQUEST => {
+                                    // Ignore REQUESTs on port 67 - those are for the regular DHCP server
+                                    continue;
                                 }
                                 _ => continue,
                             };
 
-                            let resp_type = if req.message_type == DHCP_DISCOVER {
-                                "OFFER"
+                            let (resp_type, src_port) = if req.message_type == DHCP_DISCOVER {
+                                ("OFFER", DHCP_SERVER_PORT)
                             } else {
-                                "ACK"
+                                ("ACK", PXE_PROXY_PORT) // ACK from port 4011
                             };
 
                             // Send raw packet with proper checksums
@@ -734,6 +748,7 @@ fn run_listener(args: &Args) -> Result<()> {
                                 src_mac,
                                 config.server_ip,
                                 &response,
+                                src_port,
                             ) {
                                 Ok(_) => {
                                     if req.is_ipxe {
