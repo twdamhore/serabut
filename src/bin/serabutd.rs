@@ -210,10 +210,12 @@ fn send_dhcp_response_raw(
     src_mac: MacAddr,
     src_ip: Ipv4Addr,
     dhcp_payload: &[u8],
-    src_port: u16, // 67 for regular DHCP, 4011 for ProxyDHCP
+    src_port: u16,  // 67 for regular DHCP, 4011 for ProxyDHCP
+    dst_ip: Ipv4Addr,   // Broadcast (255.255.255.255) or client IP for unicast
+    dst_port: u16,  // 68 for regular DHCP, 4011 for ProxyDHCP
 ) -> Result<()> {
+    // Use broadcast MAC for broadcast IP, otherwise we'd need ARP
     let dst_mac = MacAddr::broadcast();
-    let dst_ip = Ipv4Addr::new(255, 255, 255, 255);
 
     // Calculate sizes
     let udp_len = 8 + dhcp_payload.len();
@@ -261,7 +263,7 @@ fn send_dhcp_response_raw(
         let mut udp = MutableUdpPacket::new(&mut buffer[udp_start..udp_start + udp_len])
             .ok_or_else(|| anyhow::anyhow!("Failed to create UDP packet"))?;
         udp.set_source(src_port);
-        udp.set_destination(DHCP_CLIENT_PORT);
+        udp.set_destination(dst_port);
         udp.set_length(udp_len as u16);
         udp.set_checksum(0);
     }
@@ -576,6 +578,7 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<PxeRequest> {
 struct ProcessedPacket {
     request: PxeRequest,
     dhcp_data: Vec<u8>,
+    client_ip: Option<Ipv4Addr>, // Source IP for unicast responses (ProxyDHCP)
 }
 
 fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
@@ -597,7 +600,13 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
                             if let Some(mut request) = handle_dhcp_packet(&dhcp_data) {
                                 // Track if this is a ProxyDHCP request (port 4011)
                                 request.is_proxy_request = is_proxy;
-                                return Some(ProcessedPacket { request, dhcp_data });
+                                // Get client IP for unicast response (ProxyDHCP)
+                                let client_ip = if is_proxy {
+                                    Some(ipv4.get_source())
+                                } else {
+                                    None
+                                };
+                                return Some(ProcessedPacket { request, dhcp_data, client_ip });
                             }
                         }
                     }
@@ -640,7 +649,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix proxy-dhcp-4011-filter: attempt #7]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix proxy-dhcp-unicast-4011: attempt #8]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
@@ -736,13 +745,17 @@ fn run_listener(args: &Args) -> Result<()> {
                                 _ => continue,
                             };
 
-                            let (resp_type, src_port) = if req.message_type == DHCP_DISCOVER {
-                                ("OFFER", DHCP_SERVER_PORT)
+                            // Determine ports and destination based on request type
+                            let (resp_type, src_port, dst_ip, dst_port) = if req.message_type == DHCP_DISCOVER {
+                                // OFFER: broadcast response on port 67->68
+                                ("OFFER", DHCP_SERVER_PORT, Ipv4Addr::BROADCAST, DHCP_CLIENT_PORT)
                             } else {
-                                ("ACK", PXE_PROXY_PORT) // ACK from port 4011
+                                // ACK: unicast response to client on port 4011->4011
+                                let client = processed.client_ip.unwrap_or(Ipv4Addr::BROADCAST);
+                                ("ACK", PXE_PROXY_PORT, client, PXE_PROXY_PORT)
                             };
 
-                            // Send raw packet with proper checksums
+                            // Send raw packet
                             let mut tx_guard = tx.lock().unwrap();
                             match send_dhcp_response_raw(
                                 &mut *tx_guard,
@@ -750,6 +763,8 @@ fn run_listener(args: &Args) -> Result<()> {
                                 config.server_ip,
                                 &response,
                                 src_port,
+                                dst_ip,
+                                dst_port,
                             ) {
                                 Ok(_) => {
                                     if req.is_ipxe {
