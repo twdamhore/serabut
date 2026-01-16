@@ -209,11 +209,11 @@ fn send_dhcp_response_raw(
     tx: &mut Box<dyn DataLinkSender>,
     src_mac: MacAddr,
     src_ip: Ipv4Addr,
+    dst_mac: MacAddr,  // Destination MAC (broadcast or client MAC)
+    dst_ip: Ipv4Addr,  // Destination IP (broadcast or client IP)
     dhcp_payload: &[u8],
     src_port: u16, // 67 for regular DHCP, 4011 for ProxyDHCP
 ) -> Result<()> {
-    let dst_mac = MacAddr::broadcast();
-    let dst_ip = Ipv4Addr::new(255, 255, 255, 255);
 
     // Calculate sizes
     let udp_len = 8 + dhcp_payload.len();
@@ -576,6 +576,8 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<PxeRequest> {
 struct ProcessedPacket {
     request: PxeRequest,
     dhcp_data: Vec<u8>,
+    client_ip: Ipv4Addr,  // Source IP of the request (for unicast responses)
+    client_mac: MacAddr,  // Source MAC of the request (for unicast responses)
 }
 
 fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
@@ -598,7 +600,15 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
                             if let Some(mut request) = handle_dhcp_packet(&dhcp_data) {
                                 // Track if this is a ProxyDHCP request (port 4011)
                                 request.is_proxy_request = is_proxy;
-                                return Some(ProcessedPacket { request, dhcp_data });
+                                // Capture client's source IP and MAC for unicast responses
+                                let client_ip = ipv4.get_source();
+                                let client_mac = ethernet.get_source();
+                                return Some(ProcessedPacket {
+                                    request,
+                                    dhcp_data,
+                                    client_ip,
+                                    client_mac,
+                                });
                             }
                         }
                     }
@@ -641,7 +651,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix accept-68-to-4011: attempt #9]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix unicast-ack-4011: attempt #10]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
@@ -737,10 +747,13 @@ fn run_listener(args: &Args) -> Result<()> {
                                 _ => continue,
                             };
 
-                            let (resp_type, src_port) = if req.message_type == DHCP_DISCOVER {
-                                ("OFFER", DHCP_SERVER_PORT)
+                            let (resp_type, src_port, dst_mac, dst_ip) = if req.message_type == DHCP_DISCOVER {
+                                // OFFER: broadcast response
+                                ("OFFER", DHCP_SERVER_PORT, MacAddr::broadcast(), Ipv4Addr::new(255, 255, 255, 255))
                             } else {
-                                ("ACK", PXE_PROXY_PORT) // ACK from port 4011
+                                // ACK on port 4011: unicast to client IP/MAC
+                                // dnsmasq sends unicast 4011->68 to client IP, not broadcast
+                                ("ACK", PXE_PROXY_PORT, processed.client_mac, processed.client_ip)
                             };
 
                             // Send raw packet with proper checksums
@@ -749,19 +762,26 @@ fn run_listener(args: &Args) -> Result<()> {
                                 &mut *tx_guard,
                                 src_mac,
                                 config.server_ip,
+                                dst_mac,
+                                dst_ip,
                                 &response,
                                 src_port,
                             ) {
                                 Ok(_) => {
+                                    let dest_str = if dst_ip == Ipv4Addr::new(255, 255, 255, 255) {
+                                        "broadcast".to_string()
+                                    } else {
+                                        format!("unicast to {}", dst_ip)
+                                    };
                                     if req.is_ipxe {
                                         eprintln!(
-                                            "  Sent {} with script URL: http://{}:{}/boot",
-                                            resp_type, config.server_ip, config.http_port
+                                            "  Sent {} ({}) with script URL: http://{}:{}/boot",
+                                            resp_type, dest_str, config.server_ip, config.http_port
                                         );
                                     } else {
                                         eprintln!(
-                                            "  Sent {} with boot file: {}",
-                                            resp_type, config.boot_file
+                                            "  Sent {} ({}) with boot file: {}",
+                                            resp_type, dest_str, config.boot_file
                                         );
                                     }
                                 }
