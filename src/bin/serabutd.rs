@@ -584,7 +584,6 @@ struct ProcessedPacket {
     dhcp_data: Vec<u8>,
     client_ip: Ipv4Addr,   // Source IP of the request (for unicast responses)
     client_mac: MacAddr,   // Source MAC of the request (for unicast responses)
-    client_port: u16,      // Source port of the request (respond to same port)
 }
 
 fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
@@ -607,16 +606,14 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
                             if let Some(mut request) = handle_dhcp_packet(&dhcp_data) {
                                 // Track if this is a ProxyDHCP request (port 4011)
                                 request.is_proxy_request = is_proxy;
-                                // Capture client's source IP, MAC, and port for unicast responses
+                                // Capture client's source IP and MAC for unicast responses
                                 let client_ip = ipv4.get_source();
                                 let client_mac = ethernet.get_source();
-                                let client_port = src_port;
                                 return Some(ProcessedPacket {
                                     request,
                                     dhcp_data,
                                     client_ip,
                                     client_mac,
-                                    client_port,
                                 });
                             }
                         }
@@ -660,7 +657,7 @@ fn run_listener(args: &Args) -> Result<()> {
         respond: !args.no_respond,
     };
 
-    eprintln!("serabutd starting on interface: {} [fix sname+port: attempt #11]", interface.name);
+    eprintln!("serabutd starting on interface: {} [fix dst-port-68: attempt #12]", interface.name);
     eprintln!("Server IP: {}", server_ip);
     if config.respond {
         eprintln!("ProxyDHCP responses: enabled");
@@ -757,12 +754,12 @@ fn run_listener(args: &Args) -> Result<()> {
                             };
 
                             let (resp_type, src_port, dst_mac, dst_ip, dst_port) = if req.message_type == DHCP_DISCOVER {
-                                // OFFER: broadcast response to port 68
+                                // OFFER: broadcast response from port 67 to port 68
                                 ("OFFER", DHCP_SERVER_PORT, MacAddr::broadcast(), Ipv4Addr::new(255, 255, 255, 255), DHCP_CLIENT_PORT)
                             } else {
-                                // ACK on port 4011: unicast to client IP/MAC, respond to client's source port
-                                // PXE ROM sends from 4011, expects response on 4011
-                                ("ACK", PXE_PROXY_PORT, processed.client_mac, processed.client_ip, processed.client_port)
+                                // ACK: unicast from port 4011 to port 68
+                                // PXE ROM sends from 4011 but listens on 68 (DHCP client port)
+                                ("ACK", PXE_PROXY_PORT, processed.client_mac, processed.client_ip, DHCP_CLIENT_PORT)
                             };
 
                             // Send raw packet with proper checksums
