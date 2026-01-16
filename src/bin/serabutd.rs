@@ -65,7 +65,6 @@ struct ServerConfig {
     http_port: u16,
     boot_file: String,
     respond: bool,
-    interface_name: String,
 }
 
 fn format_mac(bytes: &[u8]) -> String {
@@ -202,47 +201,6 @@ fn build_dhcp_ack(
         response[242] = DHCP_ACK;
     }
     response
-}
-
-/// Compute UDP checksum with pseudo-header
-fn udp_checksum(src_ip: Ipv4Addr, dst_ip: Ipv4Addr, udp_packet: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-
-    // Pseudo-header: src IP
-    let src = src_ip.octets();
-    sum += u16::from_be_bytes([src[0], src[1]]) as u32;
-    sum += u16::from_be_bytes([src[2], src[3]]) as u32;
-
-    // Pseudo-header: dst IP
-    let dst = dst_ip.octets();
-    sum += u16::from_be_bytes([dst[0], dst[1]]) as u32;
-    sum += u16::from_be_bytes([dst[2], dst[3]]) as u32;
-
-    // Pseudo-header: protocol (UDP = 17)
-    sum += 17u32;
-
-    // Pseudo-header: UDP length
-    sum += udp_packet.len() as u32;
-
-    // UDP header + data
-    let mut i = 0;
-    while i + 1 < udp_packet.len() {
-        sum += u16::from_be_bytes([udp_packet[i], udp_packet[i + 1]]) as u32;
-        i += 2;
-    }
-    // Handle odd byte
-    if i < udp_packet.len() {
-        sum += (udp_packet[i] as u32) << 8;
-    }
-
-    // Fold 32-bit sum to 16 bits
-    while sum >> 16 != 0 {
-        sum = (sum & 0xffff) + (sum >> 16);
-    }
-
-    // One's complement
-    let result = !sum as u16;
-    if result == 0 { 0xffff } else { result }
 }
 
 /// Build and send a raw Ethernet frame with DHCP response
@@ -672,7 +630,6 @@ fn run_listener(args: &Args) -> Result<()> {
         http_port: args.http_port,
         boot_file: args.boot_file.clone(),
         respond: !args.no_respond,
-        interface_name: interface.name.clone(),
     };
 
     eprintln!("serabutd starting on interface: {} [fix raw-pkt-udp-cksum-zero: attempt #5]", interface.name);
@@ -707,7 +664,7 @@ fn run_listener(args: &Args) -> Result<()> {
     // Create datalink channel for raw packet I/O
     // Using raw packets allows us to compute checksums in software,
     // avoiding issues with checksum offload on virtual bridges
-    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
+    let (tx, mut rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(tx, rx)) => (tx, rx),
         Ok(_) => return Err(anyhow::anyhow!("Unhandled channel type")),
         Err(e) => {
