@@ -34,6 +34,9 @@ serde = { version = "1", features = ["derive"] }
 # Network packet handling (for DHCP)
 pnet = "0.35"
 
+# Low-level socket operations (SO_BINDTODEVICE)
+socket2 = "0.6"
+
 # File locking (Unix)
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
