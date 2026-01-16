@@ -1,55 +1,148 @@
 # Serabut
 
-A DHCP PXE boot listener that monitors network traffic and reports PXE boot requests.
+Lightweight bare metal PXE provisioning tool. Similar to MAAS/Cobbler/Foreman but simpler.
 
-## Features
+## Overview
 
-- Monitors DHCP traffic for PXE boot activity
-- Reports client MAC addresses and assigned IP addresses
-- Detects client architecture (BIOS, EFI x64, EFI ARM64, etc.)
-- Supports verbose mode with UUID and vendor class details
-- Colored terminal output (can be disabled)
-- Graceful shutdown with Ctrl+C
+Serabut provides two executables:
+
+- **`serabut`** - CLI tool for managing discovered machines and boot assignments
+- **`serabutd`** - Daemon that listens for PXE boot requests and records MAC addresses
 
 ## Requirements
 
 - Rust 1.70+
 - Linux (requires raw socket access)
-- Root/sudo privileges for packet capture
+- Root/sudo privileges or CAP_NET_RAW capability for `serabutd`
 
 ## Quick Start
 
 ```bash
-# Clone the repository
-git clone https://github.com/twdamhore/serabut.git
-cd serabut
-
-# Build release binary
+# Build
 cargo build --release
 
-# Run with auto-detected interface (requires root)
-sudo ./target/release/serabut
+# Start the daemon (requires root)
+sudo ./target/release/serabutd -i eth0
+
+# In another terminal, manage discovered machines
+./target/release/serabut mac list
 ```
 
 ## Building
 
-### Debug Build
-
 ```bash
+# Debug build
 cargo build
-```
 
-The debug binary will be at `./target/debug/serabut`.
-
-### Release Build (Recommended)
-
-```bash
+# Release build (recommended)
 cargo build --release
 ```
 
-The release binary will be at `./target/release/serabut`.
+Binaries will be at:
+- `./target/release/serabut`
+- `./target/release/serabutd`
 
-### Running Tests
+## serabutd - The Daemon
+
+Listens on a network interface for PXE DHCP DISCOVER packets and records client MAC addresses.
+
+### Usage
+
+```bash
+# Auto-detect interface
+sudo ./target/release/serabutd
+
+# Specify interface
+sudo ./target/release/serabutd -i eth0
+sudo ./target/release/serabutd --interface enp0s3
+```
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `-i, --interface <NAME>` | Network interface to listen on (default: auto-detect) |
+| `-h, --help` | Print help |
+| `-V, --version` | Print version |
+
+### What it does
+
+1. Captures network packets on the specified interface
+2. Filters for DHCP DISCOVER packets with PXE vendor class (`PXEClient`)
+3. Records the MAC address and timestamp to `/var/lib/serabut/mac.txt`
+4. Logs PXE boot requests to stderr
+
+## serabut - The CLI
+
+Command-line tool for managing discovered machines, boot assignments, and profiles.
+
+### MAC Address Management
+
+```bash
+# List all discovered MAC addresses (sorted by last seen)
+serabut mac list
+
+# Assign a label to a MAC address (a-z only, max 8 chars)
+serabut mac label aa:bb:cc:dd:ee:ff dbnode
+
+# Clear a label
+serabut mac label aa:bb:cc:dd:ee:ff ""
+
+# Remove a MAC address from the list
+serabut mac remove aa:bb:cc:dd:ee:ff
+```
+
+### Boot Assignments (MVP 2 - Coming Soon)
+
+```bash
+# Assign a boot profile to a machine (by MAC or label)
+serabut boot add dbnode ubuntu-24.04
+serabut boot add aa:bb:cc:dd:ee:ff rocky-9
+
+# Remove a boot assignment
+serabut boot remove dbnode
+
+# List active boot assignments
+serabut boot list
+```
+
+### Profile Management
+
+```bash
+# List available boot profiles
+serabut profiles list
+```
+
+## Data Files
+
+| File | Purpose |
+|------|---------|
+| `/var/lib/serabut/mac.txt` | Discovered MAC addresses (CSV: label,mac,timestamp) |
+| `/var/lib/serabut/boot.txt` | Active boot assignments (CSV: mac,profile,timestamp) |
+| `/etc/serabut/profiles/*.ipxe` | Boot profile scripts |
+
+### Example mac.txt
+
+```
+dbnode,aa:bb:cc:dd:ee:ff,2026-01-15T19:30:00Z
+,11:22:33:44:55:66,2026-01-15T18:45:00Z
+```
+
+## Environment Variables
+
+Paths are configurable for testing without root:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERABUT_DATA_DIR` | `/var/lib/serabut` | Data directory for mac.txt, boot.txt |
+| `SERABUT_CONFIG_DIR` | `/etc/serabut` | Config directory for profiles |
+
+Example:
+```bash
+SERABUT_DATA_DIR=/tmp/serabut ./target/debug/serabut mac list
+```
+
+## Testing
 
 ```bash
 # Run all tests
@@ -58,75 +151,9 @@ cargo test
 # Run tests with output
 cargo test -- --nocapture
 
-# Run a specific test
-cargo test test_name
-
-# Run tests for a specific module
-cargo test parser::
-
-# Run coverage (requires cargo-tarpaulin)
-cargo install cargo-tarpaulin
-cargo tarpaulin
-```
-
-## Running
-
-The application requires root privileges to capture raw network packets.
-
-### Basic Usage
-
-```bash
-# Run on auto-detected interface
-sudo ./target/release/serabut
-
-# Run on specific interface
-sudo ./target/release/serabut -i eth0
-
-# Verbose mode (shows UUID and vendor class)
-sudo ./target/release/serabut -v
-
-# Combine options
-sudo ./target/release/serabut -i eth0 -v --no-color
-```
-
-### List Available Interfaces
-
-```bash
-# No root required for listing interfaces
-./target/release/serabut --list-interfaces
-```
-
-## Command Line Options
-
-| Option | Description |
-|--------|-------------|
-| `-i, --interface <NAME>` | Network interface to listen on (default: auto-detect) |
-| `-v, --verbose` | Enable verbose output |
-| `--no-color` | Disable colored output |
-| `--list-interfaces` | List available network interfaces and exit |
-| `-h, --help` | Print help |
-| `-V, --version` | Print version |
-
-## Example Output
-
-### Standard Output
-
-```
-Listening for PXE boot requests on interface: eth0
-Press Ctrl+C to stop.
-
-[PXE DISCOVER] MAC: AA:BB:CC:DD:EE:FF | XID: 0x12345678 | Arch: EFI x64
-[PXE OFFER]    MAC: AA:BB:CC:DD:EE:FF | IP: 192.168.1.100 | Server: 192.168.1.1 | XID: 0x12345678 | Arch: EFI x64
-[PXE REQUEST]  MAC: AA:BB:CC:DD:EE:FF | XID: 0x12345678 | Arch: EFI x64
-[PXE ACK]      MAC: AA:BB:CC:DD:EE:FF | IP: 192.168.1.100 | Server: 192.168.1.1 | XID: 0x12345678 | Arch: EFI x64
-```
-
-### Verbose Output
-
-```
-[PXE DISCOVER] MAC: AA:BB:CC:DD:EE:FF | XID: 0x12345678 | Arch: EFI x64
-               UUID: 12345678-1234-1234-1234-123456789ABC
-               Vendor: PXEClient:Arch:00007:UNDI:003016
+# Run specific test module
+cargo test validate_mac
+cargo test dhcp
 ```
 
 ## Project Structure
@@ -134,119 +161,55 @@ Press Ctrl+C to stop.
 ```
 serabut/
 ├── src/
-│   ├── main.rs              # CLI entry point and argument parsing
-│   ├── lib.rs               # Core PxeListener orchestrator
-│   ├── error.rs             # Error types and handling
-│   ├── domain/              # Business logic types
-│   │   ├── mod.rs
-│   │   ├── dhcp.rs          # DHCP protocol types
-│   │   ├── pxe.rs           # PXE-specific types
-│   │   └── events.rs        # PxeBootEvent domain events
-│   ├── parser/              # DHCP packet parsing
-│   │   ├── mod.rs
-│   │   └── dhcp_parser.rs   # RFC 2131 compliant parser
-│   ├── detector/            # PXE detection logic
-│   │   ├── mod.rs
-│   │   └── pxe_detector.rs
-│   ├── capture/             # Network packet capture
-│   │   ├── mod.rs
-│   │   └── pnet_capture.rs  # pnet-based implementation
-│   └── reporter/            # Event reporting
-│       ├── mod.rs
-│       └── console_reporter.rs
+│   ├── lib.rs           # Shared library: MAC parsing, file I/O, validation
+│   └── bin/
+│       ├── serabut.rs   # CLI tool
+│       └── serabutd.rs  # Daemon
 ├── Cargo.toml
 ├── Cargo.lock
 ├── README.md
+├── claude.md            # Development notes
 └── LICENSE
 ```
 
-## Architecture
-
-The project follows **SOLID principles** with a clean, modular architecture:
-
-- **Single Responsibility**: Each module handles one concern
-- **Open/Closed**: Extensible through traits without modifying existing code
-- **Liskov Substitution**: All trait implementations are interchangeable
-- **Interface Segregation**: Focused, minimal trait definitions
-- **Dependency Inversion**: High-level modules depend on abstractions
-
-### Core Traits
-
-| Trait | Purpose |
-|-------|---------|
-| `PacketCapture` | Network packet capture abstraction |
-| `EventReporter` | Event reporting interface |
-| `DhcpParser` | DHCP packet parsing |
-| `PxeDetector` | PXE boot detection |
-
-## Supported Architectures
-
-| Architecture | Code | Description |
-|--------------|------|-------------|
-| BIOS | 0x00 | Legacy BIOS x86 |
-| EFI x86 | 0x06 | EFI 32-bit |
-| EFI x64 | 0x07 | EFI 64-bit (most common) |
-| EFI BC | 0x09 | EFI Byte Code |
-| EFI ARM32 | 0x0A | EFI ARM 32-bit |
-| EFI ARM64 | 0x0B | EFI ARM 64-bit |
-| EFI x64 HTTP | 0x10 | EFI x64 HTTP Boot |
-
-## Troubleshooting
-
-### Permission Denied
+## PXE Boot Flow
 
 ```
-Error: Operation not permitted
+1. Machine PXE boots
+2. Real DHCP server assigns IP
+3. serabutd detects PXE DISCOVER, records MAC
+4. (MVP 2) serabutd responds with boot file location
+5. (MVP 2) Machine fetches boot script from serabutd HTTP endpoint
+6. (MVP 2) Machine boots assigned profile or exits to local boot
 ```
 
-**Solution**: Run with sudo or as root:
-```bash
-sudo ./target/release/serabut
-```
+## Validation Rules
 
-### No Interface Found
+- **MAC addresses**: Format `aa:bb:cc:dd:ee:ff` (case-insensitive, stored lowercase)
+- **Labels**: `a-z` only, max 8 characters, must be unique
 
-```
-Error: No suitable network interface found
-```
+## Roadmap
 
-**Solution**: Specify the interface manually:
-```bash
-# List available interfaces
-./target/release/serabut --list-interfaces
+### MVP 1 - Discovery (Current)
+- [x] serabutd listens for PXE DHCP, logs MACs
+- [x] serabut mac list/label/remove
 
-# Use a specific interface
-sudo ./target/release/serabut -i <interface-name>
-```
+### MVP 2 - Boot Assignments
+- [ ] serabut boot add/remove/list
+- [ ] serabutd HTTP endpoints (/boot, /done)
+- [ ] ProxyDHCP responses
 
-### No PXE Traffic Detected
+### MVP 3 - Full Boot
+- [ ] Ubuntu 24.04 profile with autoinstall
+- [ ] Additional OS profiles
 
-- Ensure you're on the same network segment as the PXE clients
-- Check that DHCP traffic isn't being blocked by firewalls
-- Verify the correct interface is selected
-- Use Wireshark to confirm DHCP traffic is present
+## External Dependencies
 
-## Dependencies
+Serabut is designed to work alongside existing infrastructure:
 
-| Crate | Purpose |
-|-------|---------|
-| pnet | Network packet capture and parsing |
-| clap | Command-line argument parsing |
-| thiserror | Error type definitions |
-| anyhow | Error handling utilities |
-| tracing | Structured logging |
-| macaddr | MAC address handling |
-| ctrlc | Signal handling for graceful shutdown |
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Run tests (`cargo test`)
-5. Commit your changes (`git commit -m 'Add amazing feature'`)
-6. Push to the branch (`git push origin feature/amazing-feature`)
-7. Open a Pull Request
+- **DHCP server** - Serabut doesn't serve IP leases
+- **TFTP server** - For iPXE chainloading (e.g., `/srv/tftp/ipxe.efi`)
+- **HTTP server** - For OS kernel/initrd files (or served by serabutd in MVP 2+)
 
 ## License
 
