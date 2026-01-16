@@ -1,8 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use serabut::{
-    find_entry_by_label, find_entry_by_mac, list_profiles, normalize_mac, profiles_dir,
-    read_mac_entries, validate_label, validate_mac, write_mac_entries, SerabutError,
+    find_boot_by_mac, find_entry_by_label, find_entry_by_mac, list_profiles, normalize_mac,
+    profile_exists, profiles_dir, read_boot_entries, read_mac_entries, resolve_target,
+    validate_label, validate_mac, write_boot_entries, write_mac_entries, BootEntry, SerabutError,
 };
 
 #[derive(Parser)]
@@ -169,18 +170,93 @@ fn cmd_mac_remove(mac: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_boot_add(_target: &str, _profile: &str) -> Result<()> {
-    println!("Boot assignments not yet implemented (MVP 2)");
+fn cmd_boot_add(target: &str, profile: &str) -> Result<()> {
+    // Resolve target to MAC address
+    let mac = resolve_target(target)?;
+
+    // Validate profile exists
+    if !profile_exists(profile) {
+        return Err(anyhow::anyhow!(
+            "Profile '{}' not found in {}",
+            profile,
+            profiles_dir().display()
+        ));
+    }
+
+    // Read existing boot entries
+    let mut entries = read_boot_entries()?;
+
+    // Check if already assigned
+    if let Some(idx) = find_boot_by_mac(&entries, &mac) {
+        let old_profile = entries[idx].profile.clone();
+        entries[idx] = BootEntry::new(mac.clone(), profile.to_string());
+        write_boot_entries(&entries)?;
+        println!(
+            "Updated {} from '{}' to '{}'",
+            mac, old_profile, profile
+        );
+    } else {
+        entries.push(BootEntry::new(mac.clone(), profile.to_string()));
+        write_boot_entries(&entries)?;
+        println!("Assigned '{}' to {}", profile, mac);
+    }
+
     Ok(())
 }
 
-fn cmd_boot_remove(_target: &str) -> Result<()> {
-    println!("Boot assignments not yet implemented (MVP 2)");
+fn cmd_boot_remove(target: &str) -> Result<()> {
+    // Resolve target to MAC address
+    let mac = resolve_target(target)?;
+
+    // Read existing boot entries
+    let mut entries = read_boot_entries()?;
+
+    // Find and remove
+    if let Some(idx) = find_boot_by_mac(&entries, &mac) {
+        let removed = entries.remove(idx);
+        write_boot_entries(&entries)?;
+        println!("Removed boot assignment '{}' from {}", removed.profile, mac);
+    } else {
+        println!("No boot assignment found for {}", mac);
+    }
+
     Ok(())
 }
 
 fn cmd_boot_list() -> Result<()> {
-    println!("Boot assignments not yet implemented (MVP 2)");
+    let entries = read_boot_entries()?;
+
+    if entries.is_empty() {
+        println!("No active boot assignments.");
+        return Ok(());
+    }
+
+    // Get MAC entries to show labels
+    let mac_entries = read_mac_entries().unwrap_or_default();
+
+    // Print header
+    println!("{:<10} {:<19} {:<16} {:<24}", "LABEL", "MAC", "PROFILE", "ASSIGNED AT");
+    println!("{}", "-".repeat(72));
+
+    for entry in entries {
+        // Find label for this MAC
+        let label = mac_entries
+            .iter()
+            .find(|m| m.mac == entry.mac)
+            .map(|m| m.label.as_str())
+            .unwrap_or("");
+
+        let label_display = if label.is_empty() { "-" } else { label };
+
+        println!(
+            "{:<10} {:<19} {:<16} {:<24}",
+            label_display,
+            entry.mac,
+            entry.profile,
+            entry.assigned_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+    }
+
     Ok(())
 }
 

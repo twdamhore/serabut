@@ -5,32 +5,63 @@ use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
-use serabut::{ensure_data_dir, read_mac_entries, update_or_insert_mac, write_mac_entries};
+use serabut::{
+    ensure_data_dir, find_boot_by_mac, normalize_mac, read_boot_entries, read_mac_entries,
+    read_profile, update_or_insert_mac, write_boot_entries, write_mac_entries,
+};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::thread;
 
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 
 // DHCP message types
 const DHCP_DISCOVER: u8 = 1;
-#[allow(dead_code)]
 const DHCP_OFFER: u8 = 2;
-#[allow(dead_code)]
 const DHCP_REQUEST: u8 = 3;
+const DHCP_ACK: u8 = 5;
 
 // DHCP options
 const DHCP_OPTION_MESSAGE_TYPE: u8 = 53;
+const DHCP_OPTION_SERVER_ID: u8 = 54;
 const DHCP_OPTION_VENDOR_CLASS: u8 = 60;
-#[allow(dead_code)]
+const DHCP_OPTION_TFTP_SERVER: u8 = 66;
+const DHCP_OPTION_BOOTFILE: u8 = 67;
 const DHCP_OPTION_USER_CLASS: u8 = 77; // Used to detect iPXE vs PXE ROM
+const DHCP_OPTION_IPXE_ENCAP: u8 = 175; // iPXE encapsulated options
 const DHCP_OPTION_END: u8 = 255;
+
+// iPXE sub-options within option 175
+const IPXE_OPTION_SCRIPT: u8 = 8; // Boot script URL
 
 #[derive(Parser)]
 #[command(name = "serabutd")]
-#[command(about = "Serabut daemon - listens for PXE boot requests")]
+#[command(about = "Serabut daemon - PXE boot server with ProxyDHCP")]
 struct Args {
-    /// Network interface to listen on (e.g., eth0)
+    /// Network interface to listen on (e.g., eth0, br0)
     #[arg(short, long)]
     interface: Option<String>,
+
+    /// HTTP port for boot scripts (default: 6007)
+    #[arg(long, default_value = "6007")]
+    http_port: u16,
+
+    /// TFTP boot filename for PXE ROM clients (default: ipxe.efi)
+    #[arg(long, default_value = "ipxe.efi")]
+    boot_file: String,
+
+    /// Disable sending ProxyDHCP responses (listen-only mode)
+    #[arg(long)]
+    no_respond: bool,
+}
+
+/// Server configuration passed around
+struct ServerConfig {
+    server_ip: Ipv4Addr,
+    http_port: u16,
+    boot_file: String,
+    respond: bool,
 }
 
 fn format_mac(bytes: &[u8]) -> String {
@@ -39,6 +70,288 @@ fn format_mac(bytes: &[u8]) -> String {
         .map(|b| format!("{:02x}", b))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// Get the IPv4 address of an interface
+fn get_interface_ip(interface: &NetworkInterface) -> Option<Ipv4Addr> {
+    for ip in &interface.ips {
+        if let pnet::ipnetwork::IpNetwork::V4(ipv4) = ip {
+            return Some(ipv4.ip());
+        }
+    }
+    None
+}
+
+/// Build a ProxyDHCP OFFER packet
+fn build_dhcp_offer(
+    request: &[u8],
+    config: &ServerConfig,
+    is_ipxe: bool,
+) -> Vec<u8> {
+    let mut response = vec![0u8; 300]; // Base size, will grow with options
+
+    // BOOTP header
+    response[0] = 2; // op: BOOTREPLY
+    response[1] = 1; // htype: Ethernet
+    response[2] = 6; // hlen: MAC address length
+    response[3] = 0; // hops
+
+    // Copy XID from request (bytes 4-7)
+    response[4..8].copy_from_slice(&request[4..8]);
+
+    // secs = 0, flags = 0 (bytes 8-11)
+    // ciaddr = 0 (bytes 12-15) - client doesn't have IP yet
+    // yiaddr = 0 (bytes 16-19) - ProxyDHCP doesn't assign IP
+    // siaddr = our IP (bytes 20-23) - TFTP server
+    response[20..24].copy_from_slice(&config.server_ip.octets());
+
+    // giaddr = 0 (bytes 24-27)
+
+    // chaddr - copy from request (bytes 28-43)
+    response[28..44].copy_from_slice(&request[28..44]);
+
+    // sname (bytes 44-107) - server name, leave empty
+    // file (bytes 108-235) - boot filename for TFTP
+    if !is_ipxe {
+        let boot_file_bytes = config.boot_file.as_bytes();
+        let len = boot_file_bytes.len().min(127);
+        response[108..108 + len].copy_from_slice(&boot_file_bytes[..len]);
+    }
+
+    // Magic cookie (bytes 236-239)
+    response[236] = 99;
+    response[237] = 130;
+    response[238] = 83;
+    response[239] = 99;
+
+    // DHCP options start at byte 240
+    let mut options = Vec::new();
+
+    // Option 53: DHCP Message Type = OFFER
+    options.push(DHCP_OPTION_MESSAGE_TYPE);
+    options.push(1);
+    options.push(DHCP_OFFER);
+
+    // Option 54: Server Identifier
+    options.push(DHCP_OPTION_SERVER_ID);
+    options.push(4);
+    options.extend_from_slice(&config.server_ip.octets());
+
+    // Option 60: Vendor Class Identifier (PXEClient)
+    let vendor_class = b"PXEClient";
+    options.push(DHCP_OPTION_VENDOR_CLASS);
+    options.push(vendor_class.len() as u8);
+    options.extend_from_slice(vendor_class);
+
+    if is_ipxe {
+        // For iPXE clients, send the boot script URL via option 175
+        let script_url = format!("http://{}:{}/boot", config.server_ip, config.http_port);
+        let script_bytes = script_url.as_bytes();
+
+        // Option 175: iPXE encapsulated options
+        // Contains sub-option 8 (script URL)
+        let sub_option_len = 2 + script_bytes.len(); // 1 byte type + 1 byte len + data
+        options.push(DHCP_OPTION_IPXE_ENCAP);
+        options.push(sub_option_len as u8);
+        options.push(IPXE_OPTION_SCRIPT);
+        options.push(script_bytes.len() as u8);
+        options.extend_from_slice(script_bytes);
+    } else {
+        // For PXE ROM clients, send TFTP server and boot file
+        // Option 66: TFTP Server Name
+        let server_str = config.server_ip.to_string();
+        let server_bytes = server_str.as_bytes();
+        options.push(DHCP_OPTION_TFTP_SERVER);
+        options.push(server_bytes.len() as u8);
+        options.extend_from_slice(server_bytes);
+
+        // Option 67: Bootfile Name
+        let boot_bytes = config.boot_file.as_bytes();
+        options.push(DHCP_OPTION_BOOTFILE);
+        options.push(boot_bytes.len() as u8);
+        options.extend_from_slice(boot_bytes);
+    }
+
+    // End option
+    options.push(DHCP_OPTION_END);
+
+    // Append options to response
+    response.truncate(240);
+    response.extend_from_slice(&options);
+
+    response
+}
+
+/// Build a ProxyDHCP ACK packet (similar to OFFER but with ACK type)
+fn build_dhcp_ack(
+    request: &[u8],
+    config: &ServerConfig,
+    is_ipxe: bool,
+) -> Vec<u8> {
+    let mut response = build_dhcp_offer(request, config, is_ipxe);
+    // Find and replace the message type option
+    // It's right after the magic cookie at offset 240
+    if response.len() > 242 && response[240] == DHCP_OPTION_MESSAGE_TYPE {
+        response[242] = DHCP_ACK;
+    }
+    response
+}
+
+/// Send a DHCP response via UDP broadcast
+fn send_dhcp_response(socket: &UdpSocket, response: &[u8]) -> Result<()> {
+    // ProxyDHCP responses are sent to broadcast on port 68
+    let dest = SocketAddr::from(([255, 255, 255, 255], DHCP_CLIENT_PORT));
+    socket.send_to(response, dest)?;
+    Ok(())
+}
+
+// ============================================================================
+// HTTP Server for iPXE boot scripts
+// ============================================================================
+
+/// Parse the MAC address from query string like "mac=aa:bb:cc:dd:ee:ff"
+fn parse_mac_from_query(query: &str) -> Option<String> {
+    for param in query.split('&') {
+        if let Some(value) = param.strip_prefix("mac=") {
+            return Some(normalize_mac(value));
+        }
+    }
+    None
+}
+
+/// Generate an iPXE script for a machine
+fn generate_boot_script(mac: &str) -> String {
+    let entries = match read_boot_entries() {
+        Ok(e) => e,
+        Err(_) => return "#!ipxe\nexit\n".to_string(),
+    };
+
+    // Find boot assignment for this MAC
+    if let Some(idx) = find_boot_by_mac(&entries, mac) {
+        let profile_name = &entries[idx].profile;
+
+        // Try to read the profile
+        if let Ok(script) = read_profile(profile_name) {
+            return script;
+        }
+
+        // Profile not found, return error script
+        return format!(
+            "#!ipxe\necho Profile '{}' not found\nsleep 5\nexit\n",
+            profile_name
+        );
+    }
+
+    // No assignment, boot local
+    "#!ipxe\nexit\n".to_string()
+}
+
+/// Handle the /done endpoint - remove boot assignment
+fn handle_done(mac: &str) -> String {
+    let mut entries = match read_boot_entries() {
+        Ok(e) => e,
+        Err(_) => return "error".to_string(),
+    };
+
+    if let Some(idx) = find_boot_by_mac(&entries, mac) {
+        let removed = entries.remove(idx);
+        if write_boot_entries(&entries).is_ok() {
+            eprintln!("HTTP /done: removed assignment '{}' from {}", removed.profile, mac);
+            return "ok".to_string();
+        }
+    }
+
+    "not_found".to_string()
+}
+
+/// Handle an HTTP request
+fn handle_http_request(mut stream: TcpStream) {
+    let buf_reader = BufReader::new(&stream);
+    let request_line = match buf_reader.lines().next() {
+        Some(Ok(line)) => line,
+        _ => return,
+    };
+
+    // Parse request line: "GET /path?query HTTP/1.1"
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 || parts[0] != "GET" {
+        let response = "HTTP/1.1 405 Method Not Allowed\r\n\r\n";
+        let _ = stream.write_all(response.as_bytes());
+        return;
+    }
+
+    let path_query = parts[1];
+    let (path, query) = match path_query.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path_query, None),
+    };
+
+    let (status, content_type, body) = match path {
+        "/boot" => {
+            if let Some(q) = query {
+                if let Some(mac) = parse_mac_from_query(q) {
+                    eprintln!("HTTP /boot: {}", mac);
+                    let script = generate_boot_script(&mac);
+                    ("200 OK", "text/plain", script)
+                } else {
+                    ("400 Bad Request", "text/plain", "Missing mac parameter".to_string())
+                }
+            } else {
+                ("400 Bad Request", "text/plain", "Missing mac parameter".to_string())
+            }
+        }
+        "/done" => {
+            if let Some(q) = query {
+                if let Some(mac) = parse_mac_from_query(q) {
+                    let result = handle_done(&mac);
+                    ("200 OK", "text/plain", result)
+                } else {
+                    ("400 Bad Request", "text/plain", "Missing mac parameter".to_string())
+                }
+            } else {
+                ("400 Bad Request", "text/plain", "Missing mac parameter".to_string())
+            }
+        }
+        "/health" => {
+            ("200 OK", "text/plain", "ok".to_string())
+        }
+        _ => {
+            ("404 Not Found", "text/plain", "Not Found".to_string())
+        }
+    };
+
+    let response = format!(
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        status,
+        content_type,
+        body.len(),
+        body
+    );
+
+    let _ = stream.write_all(response.as_bytes());
+}
+
+/// Start the HTTP server
+fn start_http_server(bind_addr: SocketAddr) -> Result<()> {
+    let listener = TcpListener::bind(bind_addr)
+        .context(format!("Failed to bind HTTP server to {}", bind_addr))?;
+
+    eprintln!("HTTP server listening on {}", bind_addr);
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                thread::spawn(move || {
+                    handle_http_request(stream);
+                });
+            }
+            Err(e) => {
+                eprintln!("HTTP connection error: {}", e);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn parse_dhcp_options(data: &[u8]) -> (Option<u8>, Option<String>, Option<String>) {
@@ -112,7 +425,15 @@ fn is_ipxe_request(user_class: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<String> {
+/// Information about a PXE DHCP request
+#[derive(Debug, PartialEq)]
+struct PxeRequest {
+    mac: String,
+    message_type: u8,
+    is_ipxe: bool,
+}
+
+fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<PxeRequest> {
     // DHCP packet structure:
     // 0: op (1 = request, 2 = reply)
     // 1: htype (1 = ethernet)
@@ -145,10 +466,11 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<String> {
     }
 
     let mac = format_mac(&dhcp_data[28..34]);
-    let (message_type, vendor_class, _user_class) = parse_dhcp_options(dhcp_data);
+    let (message_type, vendor_class, user_class) = parse_dhcp_options(dhcp_data);
 
-    // Only process DHCP DISCOVER with PXE vendor class
-    if message_type != Some(DHCP_DISCOVER) {
+    // Only process DHCP DISCOVER or REQUEST with PXE vendor class
+    let msg_type = message_type?;
+    if msg_type != DHCP_DISCOVER && msg_type != DHCP_REQUEST {
         return None;
     }
 
@@ -156,10 +478,22 @@ fn handle_dhcp_packet(dhcp_data: &[u8]) -> Option<String> {
         return None;
     }
 
-    Some(mac)
+    let is_ipxe = is_ipxe_request(&user_class);
+
+    Some(PxeRequest {
+        mac,
+        message_type: msg_type,
+        is_ipxe,
+    })
 }
 
-fn process_packet(ethernet: &EthernetPacket) -> Option<String> {
+/// Result of processing a packet - includes the request info and raw DHCP data
+struct ProcessedPacket {
+    request: PxeRequest,
+    dhcp_data: Vec<u8>,
+}
+
+fn process_packet(ethernet: &EthernetPacket) -> Option<ProcessedPacket> {
     match ethernet.get_ethertype() {
         EtherTypes::Ipv4 => {
             if let Some(ipv4) = Ipv4Packet::new(ethernet.payload()) {
@@ -172,7 +506,10 @@ fn process_packet(ethernet: &EthernetPacket) -> Option<String> {
                         if udp.get_source() == DHCP_CLIENT_PORT
                             && udp.get_destination() == DHCP_SERVER_PORT
                         {
-                            return handle_dhcp_packet(udp.payload());
+                            let dhcp_data = udp.payload().to_vec();
+                            if let Some(request) = handle_dhcp_packet(&dhcp_data) {
+                                return Some(ProcessedPacket { request, dhcp_data });
+                            }
                         }
                     }
                 }
@@ -192,21 +529,60 @@ fn find_default_interface() -> Option<NetworkInterface> {
         .find(|iface| iface.is_up() && !iface.is_loopback() && !iface.ips.is_empty())
 }
 
-fn run_listener(interface_name: Option<&str>) -> Result<()> {
-    let interface = if let Some(name) = interface_name {
+fn run_listener(args: &Args) -> Result<()> {
+    let interface = if let Some(name) = &args.interface {
         datalink::interfaces()
             .into_iter()
-            .find(|iface| iface.name == name)
+            .find(|iface| iface.name == *name)
             .ok_or_else(|| anyhow::anyhow!("Interface '{}' not found", name))?
     } else {
         find_default_interface()
             .ok_or_else(|| anyhow::anyhow!("No suitable network interface found"))?
     };
 
+    // Get server IP from interface
+    let server_ip = get_interface_ip(&interface)
+        .ok_or_else(|| anyhow::anyhow!("Interface '{}' has no IPv4 address", interface.name))?;
+
+    let config = ServerConfig {
+        server_ip,
+        http_port: args.http_port,
+        boot_file: args.boot_file.clone(),
+        respond: !args.no_respond,
+    };
+
     eprintln!("serabutd starting on interface: {}", interface.name);
-    eprintln!("Listening for PXE boot requests...");
+    eprintln!("Server IP: {}", server_ip);
+    if config.respond {
+        eprintln!("ProxyDHCP responses: enabled");
+        eprintln!("TFTP boot file: {}", config.boot_file);
+        eprintln!("HTTP endpoint: http://{}:{}/boot", server_ip, config.http_port);
+    } else {
+        eprintln!("ProxyDHCP responses: disabled (listen-only mode)");
+    }
 
     ensure_data_dir()?;
+
+    // Start HTTP server in a separate thread
+    let http_port = config.http_port;
+    thread::spawn(move || {
+        let bind_addr = SocketAddr::from(([0, 0, 0, 0], http_port));
+        if let Err(e) = start_http_server(bind_addr) {
+            eprintln!("HTTP server error: {}", e);
+        }
+    });
+
+    eprintln!("Listening for PXE boot requests...");
+
+    // Create UDP socket for sending responses
+    let response_socket = if config.respond {
+        let socket = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0)))
+            .context("Failed to create response socket")?;
+        socket.set_broadcast(true)?;
+        Some(socket)
+    } else {
+        None
+    };
 
     let (_, mut rx) = match datalink::channel(&interface, Default::default()) {
         Ok(Ethernet(_tx, rx)) => ((), rx),
@@ -223,19 +599,68 @@ fn run_listener(interface_name: Option<&str>) -> Result<()> {
         match rx.next() {
             Ok(packet) => {
                 if let Some(ethernet) = EthernetPacket::new(packet) {
-                    if let Some(mac) = process_packet(&ethernet) {
-                        eprintln!("PXE boot request from: {}", mac);
+                    if let Some(processed) = process_packet(&ethernet) {
+                        let req = &processed.request;
+                        let client_type = if req.is_ipxe { "iPXE" } else { "PXE ROM" };
+                        let msg_type_str = match req.message_type {
+                            DHCP_DISCOVER => "DISCOVER",
+                            DHCP_REQUEST => "REQUEST",
+                            _ => "UNKNOWN",
+                        };
+
+                        eprintln!(
+                            "PXE {} from {} [{}]",
+                            msg_type_str, req.mac, client_type
+                        );
 
                         // Update mac.txt
                         match read_mac_entries() {
                             Ok(mut entries) => {
-                                update_or_insert_mac(&mut entries, &mac);
+                                update_or_insert_mac(&mut entries, &req.mac);
                                 if let Err(e) = write_mac_entries(&entries) {
-                                    eprintln!("Failed to write mac.txt: {}", e);
+                                    eprintln!("  Failed to write mac.txt: {}", e);
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Failed to read mac.txt: {}", e);
+                                eprintln!("  Failed to read mac.txt: {}", e);
+                            }
+                        }
+
+                        // Send ProxyDHCP response if enabled
+                        if let Some(ref socket) = response_socket {
+                            let response = match req.message_type {
+                                DHCP_DISCOVER => {
+                                    build_dhcp_offer(&processed.dhcp_data, &config, req.is_ipxe)
+                                }
+                                DHCP_REQUEST => {
+                                    build_dhcp_ack(&processed.dhcp_data, &config, req.is_ipxe)
+                                }
+                                _ => continue,
+                            };
+
+                            let resp_type = if req.message_type == DHCP_DISCOVER {
+                                "OFFER"
+                            } else {
+                                "ACK"
+                            };
+
+                            match send_dhcp_response(socket, &response) {
+                                Ok(_) => {
+                                    if req.is_ipxe {
+                                        eprintln!(
+                                            "  Sent {} with script URL: http://{}:{}/boot",
+                                            resp_type, config.server_ip, config.http_port
+                                        );
+                                    } else {
+                                        eprintln!(
+                                            "  Sent {} with boot file: {}",
+                                            resp_type, config.boot_file
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("  Failed to send {}: {}", resp_type, e);
+                                }
                             }
                         }
                     }
@@ -251,7 +676,7 @@ fn run_listener(interface_name: Option<&str>) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    run_listener(args.interface.as_deref()).context("Failed to run listener")
+    run_listener(&args).context("Failed to run listener")
 }
 
 #[cfg(test)]
@@ -457,8 +882,42 @@ mod tests {
                 Some("PXEClient:Arch:00007"),
                 None,
             );
-            let result = handle_dhcp_packet(&packet);
-            assert_eq!(result, Some("aa:bb:cc:dd:ee:ff".to_string()));
+            let result = handle_dhcp_packet(&packet).unwrap();
+            assert_eq!(result.mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(result.message_type, DHCP_DISCOVER);
+            assert!(!result.is_ipxe);
+        }
+
+        #[test]
+        fn accepts_pxe_request() {
+            let packet = create_dhcp_packet(
+                1, // BOOTREQUEST
+                1, // Ethernet
+                6, // MAC length
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_REQUEST),
+                Some("PXEClient:Arch:00007"),
+                None,
+            );
+            let result = handle_dhcp_packet(&packet).unwrap();
+            assert_eq!(result.mac, "aa:bb:cc:dd:ee:ff");
+            assert_eq!(result.message_type, DHCP_REQUEST);
+            assert!(!result.is_ipxe);
+        }
+
+        #[test]
+        fn detects_ipxe_client() {
+            let packet = create_dhcp_packet(
+                1,
+                1,
+                6,
+                [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                Some(DHCP_DISCOVER),
+                Some("PXEClient:Arch:00007"),
+                Some("iPXE"),
+            );
+            let result = handle_dhcp_packet(&packet).unwrap();
+            assert!(result.is_ipxe);
         }
 
         #[test]
@@ -477,13 +936,13 @@ mod tests {
         }
 
         #[test]
-        fn rejects_dhcp_request() {
+        fn rejects_dhcp_offer() {
             let packet = create_dhcp_packet(
                 1,
                 1,
                 6,
                 [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
-                Some(DHCP_REQUEST), // Not DISCOVER
+                Some(DHCP_OFFER), // Not DISCOVER or REQUEST
                 Some("PXEClient:Arch:00007"),
                 None,
             );
