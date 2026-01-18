@@ -5,15 +5,46 @@ use axum::{
     routing::get,
     Router,
 };
+use clap::Parser;
+use nix::ifaddrs::getifaddrs;
 use serabut::{disarm, init_db, is_armed, open_db};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
+
+#[derive(Parser)]
+#[command(name = "serabutd")]
+#[command(about = "PXE boot management daemon")]
+struct Cli {
+    /// Network interface to bind to (e.g., enp1s0)
+    #[arg(short, long)]
+    interface: Option<String>,
+
+    /// Port to listen on
+    #[arg(short, long, default_value = "4123")]
+    port: u16,
+}
 
 struct AppState {
     conn: Mutex<rusqlite::Connection>,
     data_dir: PathBuf,
+}
+
+fn get_interface_ip(interface: &str) -> Option<Ipv4Addr> {
+    let addrs = getifaddrs().ok()?;
+    for addr in addrs {
+        if addr.interface_name == interface {
+            if let Some(storage) = addr.address {
+                if let Some(sockaddr) = storage.as_sockaddr_in() {
+                    return Some(Ipv4Addr::from(sockaddr.ip()));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn create_app(conn: rusqlite::Connection, data_dir: PathBuf) -> Router {
@@ -29,15 +60,47 @@ fn create_app(conn: rusqlite::Connection, data_dir: PathBuf) -> Router {
 }
 
 #[tokio::main]
-async fn main() {
-    let conn = open_db().expect("failed to open database");
-    init_db(&conn).expect("failed to initialize database");
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    let bind_addr: IpAddr = match &cli.interface {
+        Some(iface) => match get_interface_ip(iface) {
+            Some(ip) => IpAddr::V4(ip),
+            None => {
+                eprintln!("error: no IPv4 address configured for interface {}", iface);
+                return ExitCode::FAILURE;
+            }
+        },
+        None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+    };
+
+    let conn = match open_db() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to open database: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(e) = init_db(&conn) {
+        eprintln!("error: failed to initialize database: {}", e);
+        return ExitCode::FAILURE;
+    }
 
     let app = create_app(conn, PathBuf::from(serabut::DATA_DIR));
 
-    let listener = TcpListener::bind("0.0.0.0:4123").await.unwrap();
-    println!("serabutd listening on port 4123");
+    let bind = format!("{}:{}", bind_addr, cli.port);
+    let listener = match TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: failed to bind to {}: {}", bind, e);
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!("serabutd listening on {}", bind);
     axum::serve(listener, app).await.unwrap();
+    ExitCode::SUCCESS
 }
 
 async fn boot_handler(
@@ -313,5 +376,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&body[..], b"not armed"); // now shows "not armed"
+    }
+
+    #[test]
+    fn test_get_interface_ip_loopback() {
+        // lo should always have 127.0.0.1
+        let ip = get_interface_ip("lo");
+        assert_eq!(ip, Some(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+    }
+
+    #[test]
+    fn test_get_interface_ip_nonexistent() {
+        let ip = get_interface_ip("nonexistent_interface_xyz");
+        assert_eq!(ip, None);
     }
 }
