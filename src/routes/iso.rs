@@ -8,8 +8,8 @@ use crate::error::{AppError, AppResult};
 use crate::services::template::TemplateContext;
 use crate::services::{HardwareService, IsoService, TemplateService};
 use axum::body::Body;
-use axum::extract::{Host, Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::fs::File;
@@ -26,10 +26,10 @@ pub struct IsoQuery {
 /// Three behaviors:
 /// 1. If path matches the ISO filename -> serve the whole ISO
 /// 2. If path.j2 exists in config dir -> render template
-/// 3. Otherwise -> read from ISO via cdfs
+/// 3. Otherwise -> read from ISO via iso9660_simple
 pub async fn handle_iso(
     State(state): State<AppState>,
-    Host(host): Host,
+    headers: HeaderMap,
     Path((iso_name, path)): Path<(String, String)>,
     Query(query): Query<IsoQuery>,
 ) -> Result<Response, AppError> {
@@ -44,13 +44,19 @@ pub async fn handle_iso(
         return serve_iso_file(&iso_service, &iso_name).await;
     }
 
+    // Extract host from headers
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+
     // Check if a template exists for this path
     if let Some(template_path) = iso_service.template_path(&iso_name, &path) {
         tracing::info!("Rendering template: {}/{}", iso_name, path);
         return serve_template(
             &config.config_path,
             &template_path,
-            &host,
+            host,
             config.port,
             &iso_name,
             &path,
@@ -59,7 +65,7 @@ pub async fn handle_iso(
         .await;
     }
 
-    // Otherwise, read from ISO via cdfs
+    // Otherwise, read from ISO via iso9660_simple
     tracing::info!("Reading from ISO: {}/{}", iso_name, path);
     serve_from_iso(&iso_service, &iso_name, &path)
 }

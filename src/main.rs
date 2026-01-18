@@ -16,7 +16,7 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
 use tracing_subscriber::EnvFilter;
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/serabut.conf";
+const DEFAULT_CONFIG_PATH: &str = "/etc/serabutd.conf";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -39,7 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_target(false)
         .init();
 
-    tracing::info!("Starting serabut PXE boot server");
+    tracing::info!("Starting serabutd PXE boot server");
     tracing::info!("Config path: {:?}", config_path);
     tracing::info!("Data path: {:?}", config.config_path);
 

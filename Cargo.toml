@@ -1,5 +1,5 @@
 [package]
-name = "serabut"
+name = "serabutd"
 version = "0.1.0"
 edition = "2021"
 description = "PXE boot server for multiple OSes with multiple configurations"
@@ -12,11 +12,11 @@ tokio-util = { version = "0.7", features = ["io"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 minijinja = "2"
-cdfs = "0.2"
 thiserror = "2"
 chrono = "0.4"
 fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
+iso9660_simple = "0.2.2"
 
 [dev-dependencies]
 tempfile = "3"

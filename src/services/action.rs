@@ -6,7 +6,7 @@ use crate::error::{AppError, AppResult};
 use chrono::Utc;
 use fs2::FileExt;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 /// Represents a pending action for a MAC address.
@@ -49,7 +49,7 @@ impl ActionService {
         })?;
 
         // Shared lock for reading
-        file.lock_shared().map_err(|e| AppError::FileRead {
+        FileExt::lock_shared(&file).map_err(|e| AppError::FileRead {
             path: path.clone(),
             source: e,
         })?;
