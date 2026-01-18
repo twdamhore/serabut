@@ -25,7 +25,7 @@ GET /action/remove?mac={mac}
 ## Directory Structure
 
 ```
-/var/lib/serabutd/config/
+/var/lib/serabutd/
   action.cfg
 
   hardware/
@@ -185,7 +185,7 @@ Installs:
 - `/usr/local/bin/serabutd`
 - `/etc/systemd/system/serabutd.service`
 - `/etc/serabutd.conf` (if not exists)
-- `/var/lib/serabutd/config/` (directory structure)
+- `/var/lib/serabutd/` (directory structure)
 
 ## Logging
 

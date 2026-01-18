@@ -104,7 +104,7 @@ mod tests {
     fn test_hardware_config_not_found_is_500() {
         let err = AppError::HardwareConfigNotFound {
             mac: "aa-bb-cc-dd-ee-ff".to_string(),
-            path: PathBuf::from("/var/lib/serabutd/config/hardware/aa-bb-cc-dd-ee-ff"),
+            path: PathBuf::from("/var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff"),
         };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
