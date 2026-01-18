@@ -3,24 +3,63 @@
 //! Handles iso.cfg parsing, ISO9660 reading, and template detection.
 
 use crate::error::{AppError, AppResult};
-use iso9660_simple::{ISODirectoryEntry, Read as IsoRead, ISO9660};
+use gpt_disk_io::BlockIo;
+use gpt_disk_types::{BlockSize, Lba};
+use iso9660::{find_file, mount, read_file_vec};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-/// Wrapper to implement iso9660_simple::Read for std::fs::File.
-struct FileDevice(File);
+const ISO_BLOCK_SIZE: u64 = 2048;
 
-impl IsoRead for FileDevice {
-    fn read(&mut self, position: usize, buffer: &mut [u8]) -> Option<()> {
-        if self.0.seek(SeekFrom::Start(position as u64)).is_err() {
-            return None;
-        }
-        if self.0.read_exact(buffer).is_ok() {
-            Some(())
-        } else {
-            None
-        }
+/// Wrapper to implement BlockIo for std::fs::File.
+struct FileBlockIo {
+    file: File,
+    num_blocks: u64,
+}
+
+impl FileBlockIo {
+    fn new(mut file: File) -> std::io::Result<Self> {
+        let size = file.seek(SeekFrom::End(0))?;
+        file.seek(SeekFrom::Start(0))?;
+        let num_blocks = size / ISO_BLOCK_SIZE;
+        Ok(Self { file, num_blocks })
+    }
+}
+
+impl BlockIo for FileBlockIo {
+    type Error = std::io::Error;
+
+    fn block_size(&self) -> BlockSize {
+        BlockSize::from_usize(ISO_BLOCK_SIZE as usize).unwrap()
+    }
+
+    fn num_blocks(&mut self) -> Result<u64, Self::Error> {
+        Ok(self.num_blocks)
+    }
+
+    fn read_blocks(
+        &mut self,
+        start_lba: Lba,
+        dst: &mut [u8],
+    ) -> Result<(), Self::Error> {
+        let offset = start_lba.0 * ISO_BLOCK_SIZE;
+        self.file.seek(SeekFrom::Start(offset))?;
+        self.file.read_exact(dst)?;
+        Ok(())
+    }
+
+    fn write_blocks(
+        &mut self,
+        _start_lba: Lba,
+        _src: &[u8],
+    ) -> Result<(), Self::Error> {
+        // Read-only, no writes needed
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
     }
 }
 
@@ -42,17 +81,9 @@ impl IsoService {
     }
 
     /// Validate ISO directory structure at startup and log warnings for issues.
-    ///
-    /// Checks:
-    /// - iso/ directory exists
-    /// - iso/ has at least one subdirectory
-    /// - Each subdirectory has iso.cfg
-    /// - iso.cfg contains filename= reference
-    /// - Referenced ISO file exists and is readable
     pub fn validate_startup(&self) {
         let iso_dir = self.config_path.join("iso");
 
-        // Check if iso directory exists
         if !iso_dir.exists() {
             tracing::warn!(
                 "ISO directory does not exist: {:?}. \
@@ -63,7 +94,6 @@ impl IsoService {
             return;
         }
 
-        // Check if iso directory has any subdirectories
         let subdirs: Vec<_> = match std::fs::read_dir(&iso_dir) {
             Ok(entries) => entries
                 .filter_map(|e| e.ok())
@@ -89,7 +119,6 @@ impl IsoService {
             return;
         }
 
-        // Validate each ISO subdirectory
         for entry in subdirs {
             let iso_name = entry.file_name();
             let iso_name_str = iso_name.to_string_lossy();
@@ -97,11 +126,9 @@ impl IsoService {
         }
     }
 
-    /// Validate a single ISO subdirectory.
     fn validate_iso_subdir(&self, iso_name: &str, iso_path: &std::path::Path) {
         let iso_cfg_path = iso_path.join("iso.cfg");
 
-        // Check if iso.cfg exists
         if !iso_cfg_path.exists() {
             tracing::warn!(
                 "ISO '{}': missing iso.cfg at {:?}. \
@@ -112,7 +139,6 @@ impl IsoService {
             return;
         }
 
-        // Try to parse iso.cfg and check for filename
         let content = match std::fs::read_to_string(&iso_cfg_path) {
             Ok(c) => c,
             Err(e) => {
@@ -126,7 +152,6 @@ impl IsoService {
             }
         };
 
-        // Look for filename= line
         let filename = content
             .lines()
             .filter_map(|line| parse_config_line(line))
@@ -146,7 +171,6 @@ impl IsoService {
             }
         };
 
-        // Check if the referenced ISO file exists
         let iso_file_path = iso_path.join(&filename);
         if !iso_file_path.exists() {
             tracing::warn!(
@@ -158,7 +182,6 @@ impl IsoService {
             return;
         }
 
-        // Check if the ISO file is readable
         if let Err(e) = File::open(&iso_file_path) {
             tracing::warn!(
                 "ISO '{}': ISO file exists but cannot be read: {:?}: {}. \
@@ -170,7 +193,6 @@ impl IsoService {
             return;
         }
 
-        // Check for boot.ipxe.j2 template
         let boot_template = iso_path.join("boot.ipxe.j2");
         if !boot_template.exists() {
             tracing::warn!(
@@ -181,7 +203,6 @@ impl IsoService {
             );
         }
 
-        // Check for automation directory
         let automation_dir = iso_path.join("automation");
         if !automation_dir.exists() {
             tracing::warn!(
@@ -192,7 +213,6 @@ impl IsoService {
                 automation_dir
             );
         } else {
-            // Check if automation directory has any profiles
             let profiles: Vec<_> = std::fs::read_dir(&automation_dir)
                 .ok()
                 .map(|entries| {
@@ -225,12 +245,10 @@ impl IsoService {
         tracing::info!("ISO '{}': validated successfully ({})", iso_name, filename);
     }
 
-    /// Get the path to an ISO directory.
     fn iso_dir(&self, iso_name: &str) -> PathBuf {
         self.config_path.join("iso").join(iso_name)
     }
 
-    /// Get the path to iso.cfg for an ISO.
     fn iso_cfg_path(&self, iso_name: &str) -> PathBuf {
         self.iso_dir(iso_name).join("iso.cfg")
     }
@@ -291,8 +309,6 @@ impl IsoService {
     }
 
     /// Check if a template exists for the given path.
-    ///
-    /// Templates have .j2 extension added to the path.
     pub fn template_path(&self, iso_name: &str, path: &str) -> Option<PathBuf> {
         let template_path = self.iso_dir(iso_name).join(format!("{}.j2", path));
         if template_path.exists() {
@@ -302,7 +318,7 @@ impl IsoService {
         }
     }
 
-    /// Read a file from within an ISO using iso9660_simple.
+    /// Read a file from within an ISO.
     pub fn read_from_iso(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
         let iso_path = self.iso_file_path(iso_name)?;
 
@@ -311,34 +327,68 @@ impl IsoService {
             source: e,
         })?;
 
-        let mut iso = ISO9660::from_device(FileDevice(file)).ok_or_else(|| AppError::IsoRead {
+        let mut block_io = FileBlockIo::new(file).map_err(|e| AppError::FileRead {
             path: iso_path.clone(),
-            message: "Failed to parse ISO9660 filesystem".to_string(),
+            source: e,
         })?;
 
-        // Normalize path - remove leading slash if present
-        let normalized_path = file_path.trim_start_matches('/');
+        let volume = mount(&mut block_io, 0).map_err(|e| AppError::IsoRead {
+            path: iso_path.clone(),
+            message: format!("Failed to mount ISO: {}", e),
+        })?;
 
-        let entry = find_file_in_iso(&mut iso, normalized_path).ok_or_else(|| {
+        // Normalize path - ensure leading slash
+        let normalized_path = if file_path.starts_with('/') {
+            file_path.to_string()
+        } else {
+            format!("/{}", file_path)
+        };
+
+        tracing::debug!("Looking for file in ISO: {}", normalized_path);
+
+        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
+            tracing::debug!("File not found: {}", e);
             AppError::FileNotFoundInIso {
                 iso: iso_name.to_string(),
                 path: file_path.to_string(),
             }
         })?;
 
-        read_iso_file(&mut iso, &entry).map_err(|e| AppError::IsoRead {
+        read_file_vec(&mut block_io, &entry).map_err(|e| AppError::IsoRead {
             path: iso_path,
-            message: e,
+            message: format!("Failed to read file from ISO: {}", e),
         })
     }
 
     /// Get the boot template path for an ISO.
-    pub fn boot_template_path(&self, iso_name: &str) -> AppResult<PathBuf> {
-        let path = self.iso_dir(iso_name).join("boot.ipxe.j2");
-        if !path.exists() {
-            return Err(AppError::TemplateNotFound { path });
+    ///
+    /// Checks automation profile first, then falls back to ISO-level template.
+    /// Order: iso/{iso}/automation/{profile}/boot.ipxe.j2 -> iso/{iso}/boot.ipxe.j2
+    pub fn boot_template_path(&self, iso_name: &str, automation: Option<&str>) -> AppResult<PathBuf> {
+        // Check automation profile specific template first
+        if let Some(profile) = automation {
+            let profile_path = self
+                .iso_dir(iso_name)
+                .join("automation")
+                .join(profile)
+                .join("boot.ipxe.j2");
+            if profile_path.exists() {
+                tracing::info!(
+                    "Using profile-specific boot template: {:?}",
+                    profile_path
+                );
+                return Ok(profile_path);
+            }
         }
-        Ok(path)
+
+        // Fall back to ISO-level template
+        let iso_path = self.iso_dir(iso_name).join("boot.ipxe.j2");
+        if iso_path.exists() {
+            tracing::info!("Using ISO-level boot template: {:?}", iso_path);
+            return Ok(iso_path);
+        }
+
+        Err(AppError::TemplateNotFound { path: iso_path })
     }
 }
 
@@ -352,69 +402,6 @@ fn parse_config_line(line: &str) -> Option<(&str, &str)> {
 
     let (key, value) = line.split_once('=')?;
     Some((key.trim(), value.trim()))
-}
-
-/// Find a file in an ISO by path.
-fn find_file_in_iso(iso: &mut ISO9660, path: &str) -> Option<ISODirectoryEntry> {
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
-    if parts.is_empty() {
-        return None;
-    }
-
-    find_entry_recursive(iso, iso.root().lba.lsb, &parts)
-}
-
-/// Recursively find an entry in the ISO directory structure.
-fn find_entry_recursive(
-    iso: &mut ISO9660,
-    dir_lba: u32,
-    remaining_parts: &[&str],
-) -> Option<ISODirectoryEntry> {
-    if remaining_parts.is_empty() {
-        return None;
-    }
-
-    let target = remaining_parts[0];
-    let rest = &remaining_parts[1..];
-
-    // Collect directory entries first to avoid borrow issues with recursion
-    let entries: Vec<ISODirectoryEntry> = {
-        let dir_iter = iso.read_directory(dir_lba as usize);
-        (&dir_iter).collect()
-    };
-
-    for entry in entries {
-        // ISO9660 names might have version suffix (;1) - strip it
-        let clean_name = entry.name.split(';').next().unwrap_or(&entry.name);
-
-        if clean_name.eq_ignore_ascii_case(target) {
-            if rest.is_empty() {
-                // Found the target
-                return Some(entry);
-            } else if entry.is_folder() {
-                // Continue searching in subdirectory
-                return find_entry_recursive(iso, entry.lsb_position(), rest);
-            }
-        }
-    }
-
-    None
-}
-
-/// Read the contents of an ISO file entry.
-fn read_iso_file(iso: &mut ISO9660, entry: &ISODirectoryEntry) -> Result<Vec<u8>, String> {
-    if entry.is_folder() {
-        return Err("Path is a directory, not a file".to_string());
-    }
-
-    let size = entry.file_size() as usize;
-    let mut contents = vec![0u8; size];
-
-    iso.read_file(entry, 0, &mut contents)
-        .ok_or_else(|| "Failed to read file from ISO".to_string())?;
-
-    Ok(contents)
 }
 
 #[cfg(test)]
@@ -483,16 +470,37 @@ mod tests {
     }
 
     #[test]
-    fn test_boot_template_path() {
+    fn test_boot_template_path_iso_level() {
         let dir = setup_test_dir();
         let iso_dir = dir.path().join("iso").join("ubuntu-24.04");
         std::fs::create_dir_all(&iso_dir).unwrap();
         std::fs::write(iso_dir.join("boot.ipxe.j2"), "boot template").unwrap();
 
         let service = IsoService::new(dir.path().to_path_buf());
-        let path = service.boot_template_path("ubuntu-24.04").unwrap();
+        let path = service.boot_template_path("ubuntu-24.04", None).unwrap();
 
         assert!(path.exists());
+        assert!(path.ends_with("boot.ipxe.j2"));
+    }
+
+    #[test]
+    fn test_boot_template_path_profile_override() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("ubuntu-24.04");
+        let profile_dir = iso_dir.join("automation").join("docker");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        std::fs::write(iso_dir.join("boot.ipxe.j2"), "iso template").unwrap();
+        std::fs::write(profile_dir.join("boot.ipxe.j2"), "profile template").unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+
+        // With profile, should use profile-specific
+        let path = service.boot_template_path("ubuntu-24.04", Some("docker")).unwrap();
+        assert!(path.to_string_lossy().contains("automation/docker"));
+
+        // Without profile, should use ISO-level
+        let path = service.boot_template_path("ubuntu-24.04", None).unwrap();
+        assert!(!path.to_string_lossy().contains("automation"));
     }
 
     #[test]
@@ -502,7 +510,7 @@ mod tests {
         std::fs::create_dir_all(&iso_dir).unwrap();
 
         let service = IsoService::new(dir.path().to_path_buf());
-        let result = service.boot_template_path("ubuntu-24.04");
+        let result = service.boot_template_path("ubuntu-24.04", None);
 
         assert!(matches!(result, Err(AppError::TemplateNotFound { .. })));
     }
