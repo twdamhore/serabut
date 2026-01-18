@@ -8,7 +8,7 @@ SYSTEMD_DIR = /etc/systemd/system
 LOGROTATE_DIR = /etc/logrotate.d
 LOG_DIR = /var/log/serabut
 
-all: build
+all: release
 
 build:
 	cargo build
@@ -22,7 +22,11 @@ test:
 coverage:
 	cargo tarpaulin --out Html --output-dir coverage
 
-install: release
+install:
+	@if [ ! -f target/release/$(BINARY_NAME) ]; then \
+		echo "Error: Binary not found. Run 'make release' first."; \
+		exit 1; \
+	fi
 	@echo "Installing $(BINARY_NAME)..."
 	install -Dm755 target/release/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Installing systemd service..."
