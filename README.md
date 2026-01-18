@@ -66,9 +66,9 @@ cp /path/to/ubuntu-24.04-live-server-amd64.iso .
 # Create boot script template
 cat > boot.ipxe.j2 << 'EOF'
 #!ipxe
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 boot
 EOF
 
@@ -187,18 +187,18 @@ iPXE script template returned by `/boot?mac={mac}`.
 **Ubuntu example:**
 ```ipxe
 #!ipxe
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 boot
 ```
 
 **AlmaLinux/RHEL example:**
 ```ipxe
 #!ipxe
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/vmlinuz ip=dhcp inst.ks=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/kickstart.ks
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/initrd.img
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 boot
 ```
 
