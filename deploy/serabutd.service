@@ -1,0 +1,14 @@
+[Unit]
+Description=Serabut PXE Boot Management Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=serabut
+Group=serabut
+ExecStart=/usr/local/bin/serabutd
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
