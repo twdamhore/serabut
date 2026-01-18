@@ -74,7 +74,12 @@ impl IntoResponse for AppError {
             AppError::InvalidMac { .. } => StatusCode::BAD_REQUEST,
         };
 
-        tracing::error!("{}", self);
+        // Log 404s as info (expected behavior), actual errors as error
+        match status {
+            StatusCode::NOT_FOUND => tracing::info!("{}", self),
+            StatusCode::BAD_REQUEST => tracing::warn!("{}", self),
+            _ => tracing::error!("{}", self),
+        }
         (status, self.to_string()).into_response()
     }
 }
