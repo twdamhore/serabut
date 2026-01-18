@@ -7,8 +7,8 @@ use crate::config::AppState;
 use crate::error::{AppError, AppResult};
 use crate::services::{ActionService, HardwareService, IsoService, TemplateService};
 use crate::services::template::TemplateContext;
-use axum::extract::{Host, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -24,7 +24,7 @@ pub struct BootQuery {
 /// Returns 404 if MAC is not found.
 pub async fn handle_boot(
     State(state): State<AppState>,
-    Host(host): Host,
+    headers: HeaderMap,
     Query(query): Query<BootQuery>,
 ) -> Result<Response, AppError> {
     let mac = normalize_mac(&query.mac)?;
@@ -59,8 +59,14 @@ pub async fn handle_boot(
     let iso_service = IsoService::new(config.config_path.clone());
     let template_path = iso_service.boot_template_path(&action.iso)?;
 
+    // Extract host from headers
+    let host = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("localhost");
+
     // Parse host and port from Host header
-    let (parsed_host, port) = parse_host_header(&host, config.port);
+    let (parsed_host, port) = parse_host_header(host, config.port);
 
     // Build template context
     let ctx = TemplateContext::new(parsed_host, port, mac)

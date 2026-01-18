@@ -1,12 +1,28 @@
 //! ISO service for managing ISO files and reading their contents.
 //!
-//! Handles iso.cfg parsing, cdfs reading, and template detection.
+//! Handles iso.cfg parsing, ISO9660 reading, and template detection.
 
 use crate::error::{AppError, AppResult};
-use cdfs::{DirectoryEntry, ISO9660};
+use iso9660_simple::{ISODirectoryEntry, Read as IsoRead, ISO9660};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+
+/// Wrapper to implement iso9660_simple::Read for std::fs::File.
+struct FileDevice(File);
+
+impl IsoRead for FileDevice {
+    fn read(&mut self, position: usize, buffer: &mut [u8]) -> Option<()> {
+        if self.0.seek(SeekFrom::Start(position as u64)).is_err() {
+            return None;
+        }
+        if self.0.read_exact(buffer).is_ok() {
+            Some(())
+        } else {
+            None
+        }
+    }
+}
 
 /// ISO configuration from iso.cfg.
 #[derive(Debug, Clone)]
@@ -102,7 +118,7 @@ impl IsoService {
         }
     }
 
-    /// Read a file from within an ISO using cdfs.
+    /// Read a file from within an ISO using iso9660_simple.
     pub fn read_from_iso(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
         let iso_path = self.iso_file_path(iso_name)?;
 
@@ -111,33 +127,24 @@ impl IsoService {
             source: e,
         })?;
 
-        let iso = ISO9660::new(file).map_err(|e| AppError::IsoRead {
+        let mut iso = ISO9660::from_device(FileDevice(file)).ok_or_else(|| AppError::IsoRead {
             path: iso_path.clone(),
-            message: e.to_string(),
+            message: "Failed to parse ISO9660 filesystem".to_string(),
         })?;
 
         // Normalize path - remove leading slash if present
         let normalized_path = file_path.trim_start_matches('/');
 
-        let entry = find_file_in_iso(&iso, normalized_path).ok_or_else(|| {
+        let entry = find_file_in_iso(&mut iso, normalized_path).ok_or_else(|| {
             AppError::FileNotFoundInIso {
                 iso: iso_name.to_string(),
                 path: file_path.to_string(),
             }
         })?;
 
-        read_iso_file(&iso, &entry).map_err(|e| AppError::IsoRead {
+        read_iso_file(&mut iso, &entry).map_err(|e| AppError::IsoRead {
             path: iso_path,
             message: e,
-        })
-    }
-
-    /// Read the raw ISO file for streaming.
-    pub fn read_iso_file(&self, iso_name: &str) -> AppResult<File> {
-        let iso_path = self.iso_file_path(iso_name)?;
-        File::open(&iso_path).map_err(|e| AppError::FileRead {
-            path: iso_path,
-            source: e,
         })
     }
 
@@ -164,44 +171,46 @@ fn parse_config_line(line: &str) -> Option<(&str, &str)> {
 }
 
 /// Find a file in an ISO by path.
-fn find_file_in_iso<T: Read>(iso: &ISO9660<T>, path: &str) -> Option<DirectoryEntry<T>> {
+fn find_file_in_iso(iso: &mut ISO9660, path: &str) -> Option<ISODirectoryEntry> {
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     if parts.is_empty() {
         return None;
     }
 
-    let root = iso.root().ok()?;
-    find_entry_recursive(root, &parts)
+    find_entry_recursive(iso, iso.root().lba.lsb, &parts)
 }
 
 /// Recursively find an entry in the ISO directory structure.
-fn find_entry_recursive<T: Read>(
-    dir: DirectoryEntry<T>,
+fn find_entry_recursive(
+    iso: &mut ISO9660,
+    dir_lba: u32,
     remaining_parts: &[&str],
-) -> Option<DirectoryEntry<T>> {
+) -> Option<ISODirectoryEntry> {
     if remaining_parts.is_empty() {
-        return Some(dir);
+        return None;
     }
 
     let target = remaining_parts[0];
     let rest = &remaining_parts[1..];
 
-    // Iterate through directory contents
-    if let DirectoryEntry::Directory(d) = dir {
-        for entry in d.contents() {
-            let entry = entry.ok()?;
-            let name = entry.identifier().to_string();
+    // Collect directory entries first to avoid borrow issues with recursion
+    let entries: Vec<ISODirectoryEntry> = {
+        let dir_iter = iso.read_directory(dir_lba as usize);
+        (&dir_iter).collect()
+    };
 
-            // ISO9660 names might have version suffix (;1) - strip it
-            let clean_name = name.split(';').next().unwrap_or(&name);
+    for entry in entries {
+        // ISO9660 names might have version suffix (;1) - strip it
+        let clean_name = entry.name.split(';').next().unwrap_or(&entry.name);
 
-            if clean_name.eq_ignore_ascii_case(target) {
-                if rest.is_empty() {
-                    return Some(entry);
-                } else {
-                    return find_entry_recursive(entry, rest);
-                }
+        if clean_name.eq_ignore_ascii_case(target) {
+            if rest.is_empty() {
+                // Found the target
+                return Some(entry);
+            } else if entry.is_folder() {
+                // Continue searching in subdirectory
+                return find_entry_recursive(iso, entry.lsb_position(), rest);
             }
         }
     }
@@ -210,18 +219,18 @@ fn find_entry_recursive<T: Read>(
 }
 
 /// Read the contents of an ISO file entry.
-fn read_iso_file<T: Read>(iso: &ISO9660<T>, entry: &DirectoryEntry<T>) -> Result<Vec<u8>, String> {
-    match entry {
-        DirectoryEntry::File(f) => {
-            let mut reader = f.read();
-            let mut contents = Vec::new();
-            reader
-                .read_to_end(&mut contents)
-                .map_err(|e| e.to_string())?;
-            Ok(contents)
-        }
-        DirectoryEntry::Directory(_) => Err("Path is a directory, not a file".to_string()),
+fn read_iso_file(iso: &mut ISO9660, entry: &ISODirectoryEntry) -> Result<Vec<u8>, String> {
+    if entry.is_folder() {
+        return Err("Path is a directory, not a file".to_string());
     }
+
+    let size = entry.file_size() as usize;
+    let mut contents = vec![0u8; size];
+
+    iso.read_file(entry, 0, &mut contents)
+        .ok_or_else(|| "Failed to read file from ISO".to_string())?;
+
+    Ok(contents)
 }
 
 #[cfg(test)]

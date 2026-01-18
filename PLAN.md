@@ -15,7 +15,7 @@ GET /boot?mac={mac}
 GET /iso/{iso-name}/{path}
     → If {path} matches filename in iso.cfg → serve whole ISO file
     → If {path}.j2 exists in config dir → render template
-    → Else → stream from ISO via cdfs
+    → Else → stream from ISO via iso9660_simple
 
 GET /action/remove?mac={mac}
     → Comments out MAC line in action.cfg
@@ -25,7 +25,7 @@ GET /action/remove?mac={mac}
 ## Directory Structure
 
 ```
-/var/lib/serabut/config/
+/var/lib/serabutd/config/
   action.cfg
 
   hardware/
@@ -136,8 +136,8 @@ Available in all templates:
 6. Server renders ubuntu-24.04.3/boot.ipxe.j2
 7. Returns rendered iPXE script
 8. iPXE fetches /action/remove → MAC commented out
-9. iPXE fetches kernel via cdfs
-10. iPXE fetches initrd via cdfs
+9. iPXE fetches kernel via iso9660_simple
+10. iPXE fetches initrd via iso9660_simple
 11. iPXE boots kernel
 12. Installer fetches /iso/ubuntu-24.04.3/automation/docker/10-10-30-40-50-60/user-data
 13. Server renders user-data.j2 with hostname from hardware.cfg
@@ -157,7 +157,7 @@ Available in all templates:
 
 ## Configuration
 
-### /etc/serabut.conf
+### /etc/serabutd.conf
 
 ```
 interface=0.0.0.0
@@ -182,17 +182,17 @@ sudo make uninstall # remove
 ```
 
 Installs:
-- `/usr/local/bin/serabut`
-- `/etc/systemd/system/serabut.service`
-- `/etc/serabut.conf` (if not exists)
-- `/var/lib/serabut/config/` (directory structure)
+- `/usr/local/bin/serabutd`
+- `/etc/systemd/system/serabutd.service`
+- `/etc/serabutd.conf` (if not exists)
+- `/var/lib/serabutd/config/` (directory structure)
 
 ## Logging
 
 Logs to stdout (captured by journald when running as service).
 
 ```
-journalctl -u serabut -f
+journalctl -u serabutd -f
 ```
 
 Log entries:
@@ -217,10 +217,10 @@ Multiple machines booting simultaneously won't corrupt the file.
 ## Reload
 
 ```
-sudo systemctl reload serabut
+sudo systemctl reload serabutd
 ```
 
-SIGHUP reloads configuration (serabut.conf) without restart.
+SIGHUP reloads configuration (serabutd.conf) without restart.
 Does not affect in-flight requests.
 
 ## Code Structure
@@ -228,7 +228,7 @@ Does not affect in-flight requests.
 ```
 src/
   main.rs           → entry point, signal handling, server startup
-  config.rs         → serabut.conf parsing, reload logic
+  config.rs         → serabutd.conf parsing, reload logic
   routes/
     mod.rs          → router setup
     boot.rs         → GET /boot handler
@@ -238,7 +238,7 @@ src/
     mod.rs
     action.rs       → action.cfg read/write with file locking
     hardware.rs     → hardware.cfg parsing
-    iso.rs          → iso.cfg parsing, cdfs reading
+    iso.rs          → iso.cfg parsing, iso9660_simple reading
     template.rs     → MiniJinja rendering
   error.rs          → error types, conversions
 ```
@@ -274,6 +274,6 @@ make coverage       # run tests with coverage report
 
 - Rust
 - MiniJinja for templating
-- cdfs for reading ISO files without mounting
+- iso9660_simple for reading ISO files without mounting
 - axum for HTTP server
 - tracing for logging

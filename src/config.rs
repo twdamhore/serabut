@@ -1,6 +1,6 @@
-//! Configuration management for serabut.
+//! Configuration management for serabutd.
 //!
-//! Handles parsing of /etc/serabut.conf and runtime configuration.
+//! Handles parsing of /etc/serabutd.conf and runtime configuration.
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ pub struct Config {
     pub port: u16,
     /// Log level (default: info)
     pub log_level: LogLevel,
-    /// Base path for config files (default: /var/lib/serabut/config)
+    /// Base path for config files (default: /var/lib/serabutd/config)
     pub config_path: PathBuf,
 }
 
@@ -36,7 +36,7 @@ impl Default for Config {
             interface: IpAddr::from([0, 0, 0, 0]),
             port: 4123,
             log_level: LogLevel::Info,
-            config_path: PathBuf::from("/var/lib/serabut/config"),
+            config_path: PathBuf::from("/var/lib/serabutd/config"),
         }
     }
 }

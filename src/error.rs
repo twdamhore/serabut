@@ -1,4 +1,4 @@
-//! Error types for the serabut application.
+//! Error types for the serabutd application.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -55,9 +55,6 @@ pub enum AppError {
 
     #[error("Invalid MAC address format: {mac}")]
     InvalidMac { mac: String },
-
-    #[error("Missing Host header")]
-    MissingHostHeader,
 }
 
 impl IntoResponse for AppError {
@@ -75,7 +72,6 @@ impl IntoResponse for AppError {
             AppError::FileWrite { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::IsoRead { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             AppError::InvalidMac { .. } => StatusCode::BAD_REQUEST,
-            AppError::MissingHostHeader => StatusCode::BAD_REQUEST,
         };
 
         tracing::error!("{}", self);
@@ -103,7 +99,7 @@ mod tests {
     fn test_hardware_config_not_found_is_500() {
         let err = AppError::HardwareConfigNotFound {
             mac: "aa-bb-cc-dd-ee-ff".to_string(),
-            path: PathBuf::from("/var/lib/serabut/config/hardware/aa-bb-cc-dd-ee-ff"),
+            path: PathBuf::from("/var/lib/serabutd/config/hardware/aa-bb-cc-dd-ee-ff"),
         };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);

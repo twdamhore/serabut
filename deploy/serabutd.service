@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/serabut
+ExecStart=/usr/local/bin/serabutd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
@@ -14,7 +14,7 @@ RestartSec=5
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/serabut
+ReadWritePaths=/var/lib/serabutd
 PrivateTmp=yes
 
 [Install]
