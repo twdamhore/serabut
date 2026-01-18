@@ -1,6 +1,7 @@
 .PHONY: all build release test coverage install uninstall clean
 
 BINARY_NAME = serabutd
+SERVICE_USER = serabut
 INSTALL_DIR = /usr/local/bin
 CONFIG_DIR = /etc
 DATA_DIR = /var/lib/serabutd/config
@@ -27,14 +28,22 @@ install:
 		echo "Error: Binary not found. Run 'make release' first."; \
 		exit 1; \
 	fi
+	@echo "Creating service user $(SERVICE_USER)..."
+	@if ! id -u $(SERVICE_USER) >/dev/null 2>&1; then \
+		useradd --system --no-create-home --shell /usr/sbin/nologin $(SERVICE_USER); \
+		echo "User $(SERVICE_USER) created."; \
+	else \
+		echo "User $(SERVICE_USER) already exists."; \
+	fi
 	@echo "Installing $(BINARY_NAME)..."
 	install -Dm755 target/release/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Installing systemd service..."
 	install -Dm644 deploy/serabutd.service $(SYSTEMD_DIR)/serabutd.service
 	@echo "Creating config directory..."
-	install -dm755 $(DATA_DIR)
-	install -dm755 $(DATA_DIR)/hardware
-	install -dm755 $(DATA_DIR)/iso
+	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) /var/lib/serabutd
+	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)
+	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)/hardware
+	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)/iso
 	@if [ ! -f $(CONFIG_DIR)/serabutd.conf ]; then \
 		echo "Installing default config..."; \
 		install -Dm644 deploy/serabutd.conf $(CONFIG_DIR)/serabutd.conf; \
@@ -44,9 +53,10 @@ install:
 	@if [ ! -f $(DATA_DIR)/action.cfg ]; then \
 		echo "Creating empty action.cfg..."; \
 		touch $(DATA_DIR)/action.cfg; \
+		chown $(SERVICE_USER):$(SERVICE_USER) $(DATA_DIR)/action.cfg; \
 	fi
 	@echo "Creating log directory..."
-	install -dm755 $(LOG_DIR)
+	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(LOG_DIR)
 	@echo "Installing logrotate config..."
 	install -Dm644 deploy/serabutd.logrotate $(LOGROTATE_DIR)/serabutd
 	@echo "Reloading systemd..."
