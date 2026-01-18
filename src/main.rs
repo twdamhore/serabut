@@ -8,6 +8,7 @@ mod routes;
 mod services;
 
 use config::AppState;
+use services::iso::IsoService;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -47,6 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Starting serabutd PXE boot server");
     tracing::info!("Config path: {:?}", config_path);
     tracing::info!("Data path: {:?}", config.config_path);
+
+    // Validate ISO directory structure
+    let iso_service = IsoService::new(config.config_path.clone());
+    iso_service.validate_startup();
 
     // Create router
     let app = routes::create_router(state.clone());

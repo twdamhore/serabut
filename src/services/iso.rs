@@ -41,6 +41,140 @@ impl IsoService {
         Self { config_path }
     }
 
+    /// Validate ISO directory structure at startup and log warnings for issues.
+    ///
+    /// Checks:
+    /// - iso/ directory exists
+    /// - iso/ has at least one subdirectory
+    /// - Each subdirectory has iso.cfg
+    /// - iso.cfg contains filename= reference
+    /// - Referenced ISO file exists and is readable
+    pub fn validate_startup(&self) {
+        let iso_dir = self.config_path.join("iso");
+
+        // Check if iso directory exists
+        if !iso_dir.exists() {
+            tracing::warn!(
+                "ISO directory does not exist: {:?}. \
+                Create this directory and add ISO subdirectories (e.g., ubuntu-24.04.3/) \
+                to enable PXE boot functionality.",
+                iso_dir
+            );
+            return;
+        }
+
+        // Check if iso directory has any subdirectories
+        let subdirs: Vec<_> = match std::fs::read_dir(&iso_dir) {
+            Ok(entries) => entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    "Cannot read ISO directory {:?}: {}. Check directory permissions.",
+                    iso_dir,
+                    e
+                );
+                return;
+            }
+        };
+
+        if subdirs.is_empty() {
+            tracing::warn!(
+                "ISO directory is empty: {:?}. \
+                Create subdirectories for each OS (e.g., ubuntu-24.04.3/, alma-9.4/) \
+                containing iso.cfg and the ISO file.",
+                iso_dir
+            );
+            return;
+        }
+
+        // Validate each ISO subdirectory
+        for entry in subdirs {
+            let iso_name = entry.file_name();
+            let iso_name_str = iso_name.to_string_lossy();
+            self.validate_iso_subdir(&iso_name_str, &entry.path());
+        }
+    }
+
+    /// Validate a single ISO subdirectory.
+    fn validate_iso_subdir(&self, iso_name: &str, iso_path: &std::path::Path) {
+        let iso_cfg_path = iso_path.join("iso.cfg");
+
+        // Check if iso.cfg exists
+        if !iso_cfg_path.exists() {
+            tracing::warn!(
+                "ISO '{}': missing iso.cfg at {:?}. \
+                Create this file with 'filename=<iso-file-name>' to specify the ISO file.",
+                iso_name,
+                iso_cfg_path
+            );
+            return;
+        }
+
+        // Try to parse iso.cfg and check for filename
+        let content = match std::fs::read_to_string(&iso_cfg_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    "ISO '{}': cannot read iso.cfg at {:?}: {}. Check file permissions.",
+                    iso_name,
+                    iso_cfg_path,
+                    e
+                );
+                return;
+            }
+        };
+
+        // Look for filename= line
+        let filename = content
+            .lines()
+            .filter_map(|line| parse_config_line(line))
+            .find(|(key, _)| *key == "filename")
+            .map(|(_, value)| value.to_string());
+
+        let filename = match filename {
+            Some(f) if !f.is_empty() => f,
+            _ => {
+                tracing::warn!(
+                    "ISO '{}': iso.cfg at {:?} is missing 'filename=' entry. \
+                    Add 'filename=<iso-file-name>' to specify the ISO file.",
+                    iso_name,
+                    iso_cfg_path
+                );
+                return;
+            }
+        };
+
+        // Check if the referenced ISO file exists
+        let iso_file_path = iso_path.join(&filename);
+        if !iso_file_path.exists() {
+            tracing::warn!(
+                "ISO '{}': ISO file does not exist: {:?}. \
+                Download or copy the ISO file to this location.",
+                iso_name,
+                iso_file_path
+            );
+            return;
+        }
+
+        // Check if the ISO file is readable
+        match File::open(&iso_file_path) {
+            Ok(_) => {
+                tracing::info!("ISO '{}': validated successfully ({})", iso_name, filename);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "ISO '{}': ISO file exists but cannot be read: {:?}: {}. \
+                    Check file permissions.",
+                    iso_name,
+                    iso_file_path,
+                    e
+                );
+            }
+        }
+    }
+
     /// Get the path to an ISO directory.
     fn iso_dir(&self, iso_name: &str) -> PathBuf {
         self.config_path.join("iso").join(iso_name)
