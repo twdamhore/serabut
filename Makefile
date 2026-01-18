@@ -39,7 +39,15 @@ install:
 	install -Dm755 target/release/$(BINARY_NAME) $(INSTALL_DIR)/$(BINARY_NAME)
 	@echo "Installing systemd service..."
 	install -Dm644 deploy/serabutd.service $(SYSTEMD_DIR)/serabutd.service
-	@echo "Creating config directory..."
+	@echo "Setting up directories..."
+	@if [ -d /var/lib/serabutd ]; then \
+		echo "Fixing ownership of /var/lib/serabutd..."; \
+		chown -R $(SERVICE_USER):$(SERVICE_USER) /var/lib/serabutd; \
+	fi
+	@if [ -d $(LOG_DIR) ]; then \
+		echo "Fixing ownership of $(LOG_DIR)..."; \
+		chown -R $(SERVICE_USER):$(SERVICE_USER) $(LOG_DIR); \
+	fi
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) /var/lib/serabutd
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)/hardware
