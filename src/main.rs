@@ -31,11 +31,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(config_path.clone())?;
     let config = state.config().await;
 
-    // Initialize logging to /var/log/serabut/ with daily rotation
+    // Initialize logging to /var/log/serabut/ (use logrotate for rotation)
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.tracing_filter()));
 
-    let file_appender = rolling::daily("/var/log/serabut", "serabutd.log");
+    let file_appender = rolling::never("/var/log/serabut", "serabutd.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
@@ -53,7 +53,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Bind address
     let addr = SocketAddr::from((config.interface, config.port));
-    tracing::info!("Listening on {}", addr);
+    tracing::info!("HTTP server listening on IP {} port {}", config.interface, config.port);
 
     let listener = TcpListener::bind(addr).await?;
 

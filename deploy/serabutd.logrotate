@@ -1,0 +1,10 @@
+/var/log/serabut/serabutd.log {
+    monthly
+    rotate 12
+    dateext
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
