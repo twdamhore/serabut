@@ -9,7 +9,7 @@ use crate::services::template::TemplateContext;
 use crate::services::{HardwareService, IsoService, TemplateService};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use tokio::fs::File;
@@ -79,15 +79,21 @@ async fn serve_iso_file(iso_service: &IsoService, iso_name: &str) -> AppResult<R
         source: e,
     })?;
 
+    let metadata = file.metadata().await.map_err(|e| AppError::FileRead {
+        path: iso_path.clone(),
+        source: e,
+    })?;
+    let content_length = metadata.len();
+
     let stream = ReaderStream::new(file);
     let body = Body::from_stream(stream);
 
-    Ok((
-        StatusCode::OK,
-        [("content-type", "application/octet-stream")],
-        body,
-    )
-        .into_response())
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(body)
+        .unwrap())
 }
 
 /// Serve a rendered template.
