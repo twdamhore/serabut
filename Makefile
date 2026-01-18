@@ -4,7 +4,7 @@ BINARY_NAME = serabutd
 SERVICE_USER = serabut
 INSTALL_DIR = /usr/local/bin
 CONFIG_DIR = /etc
-DATA_DIR = /var/lib/serabutd/config
+DATA_DIR = /var/lib/serabutd
 SYSTEMD_DIR = /etc/systemd/system
 LOGROTATE_DIR = /etc/logrotate.d
 LOG_DIR = /var/log/serabut
@@ -48,7 +48,6 @@ install:
 		echo "Fixing ownership of $(LOG_DIR)..."; \
 		chown -R $(SERVICE_USER):$(SERVICE_USER) $(LOG_DIR); \
 	fi
-	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) /var/lib/serabutd
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)/hardware
 	install -dm755 -o $(SERVICE_USER) -g $(SERVICE_USER) $(DATA_DIR)/iso

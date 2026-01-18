@@ -53,7 +53,7 @@ sudo systemctl enable --now serabutd
 ### 1. Add an ISO
 
 ```bash
-cd /var/lib/serabutd/config/iso
+cd /var/lib/serabutd/iso
 mkdir ubuntu-24.04
 cd ubuntu-24.04
 
@@ -87,15 +87,15 @@ touch automation/default/meta-data.j2
 
 ```bash
 # Create hardware config for each machine (use MAC with hyphens)
-mkdir -p /var/lib/serabutd/config/hardware/aa-bb-cc-dd-ee-ff
-echo "hostname=server01" > /var/lib/serabutd/config/hardware/aa-bb-cc-dd-ee-ff/hardware.cfg
+mkdir -p /var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff
+echo "hostname=server01" > /var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff/hardware.cfg
 ```
 
 ### 3. Schedule Installation
 
 ```bash
 # Add MAC to action.cfg: mac=iso,automation-profile
-echo "aa-bb-cc-dd-ee-ff=ubuntu-24.04,default" >> /var/lib/serabutd/config/action.cfg
+echo "aa-bb-cc-dd-ee-ff=ubuntu-24.04,default" >> /var/lib/serabutd/action.cfg
 ```
 
 ### 4. Boot the Machine
@@ -107,7 +107,7 @@ To reinstall: uncomment or re-add the MAC line in `action.cfg`.
 ## Directory Structure
 
 ```
-/var/lib/serabutd/config/
+/var/lib/serabutd/
 ├── action.cfg                     # MAC → ISO,profile mappings
 ├── hardware/
 │   └── {mac}/
@@ -149,7 +149,7 @@ aa-bb-cc-dd-ee-ff=ubuntu-24.04,default
 
 ### hardware.cfg (Required per machine)
 
-Location: `/var/lib/serabutd/config/hardware/{mac}/hardware.cfg`
+Location: `/var/lib/serabutd/hardware/{mac}/hardware.cfg`
 
 ```ini
 hostname=server01
@@ -166,7 +166,7 @@ datacenter=dc1
 
 ### iso.cfg (Required per ISO)
 
-Location: `/var/lib/serabutd/config/iso/{iso-name}/iso.cfg`
+Location: `/var/lib/serabutd/iso/{iso-name}/iso.cfg`
 
 ```ini
 filename=ubuntu-24.04-live-server-amd64.iso
@@ -180,7 +180,7 @@ filename=ubuntu-24.04-live-server-amd64.iso
 
 ### boot.ipxe.j2 (Required per ISO)
 
-Location: `/var/lib/serabutd/config/iso/{iso-name}/boot.ipxe.j2`
+Location: `/var/lib/serabutd/iso/{iso-name}/boot.ipxe.j2`
 
 iPXE script template returned by `/boot?mac={mac}`.
 
@@ -206,7 +206,7 @@ boot
 
 ### Automation Templates (Required per profile)
 
-Location: `/var/lib/serabutd/config/iso/{iso-name}/automation/{profile}/`
+Location: `/var/lib/serabutd/iso/{iso-name}/automation/{profile}/`
 
 **Ubuntu (cloud-init) - user-data.j2:**
 ```yaml
