@@ -1,0 +1,259 @@
+//! ISO endpoint handler.
+//!
+//! GET /iso/{iso_name}/{path}
+//! Serves ISO files, templates, or files from within ISOs.
+
+use crate::config::AppState;
+use crate::error::{AppError, AppResult};
+use crate::services::template::TemplateContext;
+use crate::services::{HardwareService, IsoService, TemplateService};
+use axum::body::Body;
+use axum::extract::{Host, Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
+use tokio::fs::File;
+use tokio_util::io::ReaderStream;
+
+/// Query parameters for the ISO endpoint.
+#[derive(Debug, Deserialize, Default)]
+pub struct IsoQuery {
+    pub mac: Option<String>,
+}
+
+/// Handle GET /iso/{iso_name}/{path}
+///
+/// Three behaviors:
+/// 1. If path matches the ISO filename -> serve the whole ISO
+/// 2. If path.j2 exists in config dir -> render template
+/// 3. Otherwise -> read from ISO via cdfs
+pub async fn handle_iso(
+    State(state): State<AppState>,
+    Host(host): Host,
+    Path((iso_name, path)): Path<(String, String)>,
+    Query(query): Query<IsoQuery>,
+) -> Result<Response, AppError> {
+    let config = state.config().await;
+    let iso_service = IsoService::new(config.config_path.clone());
+
+    tracing::debug!("ISO request: iso={}, path={}", iso_name, path);
+
+    // Check if this is a request for the ISO file itself
+    if iso_service.is_iso_file(&iso_name, &path)? {
+        tracing::info!("Serving ISO file: {}/{}", iso_name, path);
+        return serve_iso_file(&iso_service, &iso_name).await;
+    }
+
+    // Check if a template exists for this path
+    if let Some(template_path) = iso_service.template_path(&iso_name, &path) {
+        tracing::info!("Rendering template: {}/{}", iso_name, path);
+        return serve_template(
+            &config.config_path,
+            &template_path,
+            &host,
+            config.port,
+            &iso_name,
+            &path,
+            query.mac.as_deref(),
+        )
+        .await;
+    }
+
+    // Otherwise, read from ISO via cdfs
+    tracing::info!("Reading from ISO: {}/{}", iso_name, path);
+    serve_from_iso(&iso_service, &iso_name, &path)
+}
+
+/// Serve the ISO file itself for streaming.
+async fn serve_iso_file(iso_service: &IsoService, iso_name: &str) -> AppResult<Response> {
+    let iso_path = iso_service.iso_file_path(iso_name)?;
+
+    let file = File::open(&iso_path).await.map_err(|e| AppError::FileRead {
+        path: iso_path.clone(),
+        source: e,
+    })?;
+
+    let stream = ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Ok((
+        StatusCode::OK,
+        [("content-type", "application/octet-stream")],
+        body,
+    )
+        .into_response())
+}
+
+/// Serve a rendered template.
+async fn serve_template(
+    config_path: &std::path::Path,
+    template_path: &std::path::Path,
+    host: &str,
+    default_port: u16,
+    iso_name: &str,
+    path: &str,
+    mac: Option<&str>,
+) -> AppResult<Response> {
+    // Parse host and port
+    let (parsed_host, port) = parse_host_header(host, default_port);
+
+    // Extract MAC and automation from path if present
+    // Path format: automation/{automation}/{mac}/{file}
+    let (automation, mac) = extract_automation_and_mac(path, mac)?;
+
+    // Build template context
+    let mut ctx = TemplateContext::new(parsed_host, port, mac.clone())
+        .with_iso(iso_name.to_string());
+
+    if let Some(auto) = automation {
+        ctx = ctx.with_automation(auto);
+    }
+
+    // Load hardware config if we have a MAC
+    let hardware_service = HardwareService::new(config_path.to_path_buf());
+    let hardware = hardware_service.load(&mac)?;
+    ctx = ctx.with_hostname(hardware.hostname).with_extra(hardware.extra);
+
+    // Render template
+    let template_service = TemplateService::new();
+    let rendered = template_service.render_file(template_path, &ctx)?;
+
+    // Determine content type based on file extension
+    let content_type = guess_content_type(path);
+
+    Ok((StatusCode::OK, [("content-type", content_type)], rendered).into_response())
+}
+
+/// Serve a file from within the ISO.
+fn serve_from_iso(iso_service: &IsoService, iso_name: &str, path: &str) -> AppResult<Response> {
+    let content = iso_service.read_from_iso(iso_name, path)?;
+
+    // Determine content type based on file extension
+    let content_type = guess_content_type(path);
+
+    Ok((StatusCode::OK, [("content-type", content_type)], content).into_response())
+}
+
+/// Extract automation name and MAC from path.
+///
+/// Path format: automation/{automation}/{mac}/{file}
+/// Returns (automation, mac)
+fn extract_automation_and_mac(path: &str, query_mac: Option<&str>) -> AppResult<(Option<String>, String)> {
+    let parts: Vec<&str> = path.split('/').collect();
+
+    // Check if path matches automation/{automation}/{mac}/{file}
+    if parts.len() >= 4 && parts[0] == "automation" {
+        let automation = parts[1].to_string();
+        let mac = normalize_mac(parts[2])?;
+        return Ok((Some(automation), mac));
+    }
+
+    // Fall back to query parameter
+    if let Some(mac) = query_mac {
+        let mac = normalize_mac(mac)?;
+        return Ok((None, mac));
+    }
+
+    // No MAC available - this shouldn't happen for templates that need it
+    Err(AppError::InvalidMac {
+        mac: "missing".to_string(),
+    })
+}
+
+/// Normalize MAC address to lowercase with hyphens.
+fn normalize_mac(mac: &str) -> AppResult<String> {
+    let mac = mac.trim().to_lowercase();
+    let normalized = mac.replace(':', "-");
+
+    if !is_valid_mac(&normalized) {
+        return Err(AppError::InvalidMac { mac });
+    }
+
+    Ok(normalized)
+}
+
+/// Check if a string is a valid MAC address.
+fn is_valid_mac(mac: &str) -> bool {
+    let parts: Vec<&str> = mac.split('-').collect();
+
+    if parts.len() != 6 {
+        return false;
+    }
+
+    parts
+        .iter()
+        .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Parse host and port from Host header.
+fn parse_host_header(host: &str, default_port: u16) -> (String, u16) {
+    if let Some((h, p)) = host.rsplit_once(':') {
+        if let Ok(port) = p.parse::<u16>() {
+            return (h.to_string(), port);
+        }
+    }
+    (host.to_string(), default_port)
+}
+
+/// Guess content type from file extension.
+fn guess_content_type(path: &str) -> &'static str {
+    if path.ends_with(".iso") {
+        "application/octet-stream"
+    } else if path.ends_with(".j2") || path.ends_with(".yaml") || path.ends_with(".yml") {
+        "text/plain; charset=utf-8"
+    } else if path.ends_with(".ks") {
+        "text/plain; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else {
+        "application/octet-stream"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_automation_and_mac_from_path() {
+        let (auto, mac) =
+            extract_automation_and_mac("automation/docker/aa-bb-cc-dd-ee-ff/user-data", None)
+                .unwrap();
+        assert_eq!(auto, Some("docker".to_string()));
+        assert_eq!(mac, "aa-bb-cc-dd-ee-ff");
+    }
+
+    #[test]
+    fn test_extract_automation_and_mac_from_query() {
+        let (auto, mac) =
+            extract_automation_and_mac("some/path", Some("aa-bb-cc-dd-ee-ff")).unwrap();
+        assert_eq!(auto, None);
+        assert_eq!(mac, "aa-bb-cc-dd-ee-ff");
+    }
+
+    #[test]
+    fn test_extract_automation_and_mac_missing() {
+        let result = extract_automation_and_mac("some/path", None);
+        assert!(matches!(result, Err(AppError::InvalidMac { .. })));
+    }
+
+    #[test]
+    fn test_guess_content_type() {
+        assert_eq!(guess_content_type("file.iso"), "application/octet-stream");
+        assert_eq!(guess_content_type("user-data"), "application/octet-stream");
+        assert_eq!(guess_content_type("config.yaml"), "text/plain; charset=utf-8");
+        assert_eq!(guess_content_type("kickstart.ks"), "text/plain; charset=utf-8");
+        assert_eq!(guess_content_type("data.json"), "application/json");
+    }
+
+    #[test]
+    fn test_parse_host_header() {
+        let (host, port) = parse_host_header("192.168.1.1:8080", 4123);
+        assert_eq!(host, "192.168.1.1");
+        assert_eq!(port, 8080);
+
+        let (host, port) = parse_host_header("pxe.local", 4123);
+        assert_eq!(host, "pxe.local");
+        assert_eq!(port, 4123);
+    }
+}

@@ -1,0 +1,21 @@
+[Unit]
+Description=Serabut PXE Boot Server
+Documentation=https://github.com/twdamhore/serabut
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/serabut
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/serabut
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
