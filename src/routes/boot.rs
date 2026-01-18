@@ -55,8 +55,9 @@ pub async fn handle_boot(
     let hardware_service = HardwareService::new(config.config_path.clone());
     let hardware = hardware_service.load(&mac)?;
 
-    // Get boot template (profile-specific or ISO-level)
+    // Get ISO config and boot template
     let iso_service = IsoService::new(config.config_path.clone());
+    let iso_config = iso_service.load_config(&action.iso)?;
     let template_path = iso_service.boot_template_path(&action.iso, Some(&action.automation))?;
 
     // Extract host from headers
@@ -76,6 +77,7 @@ pub async fn handle_boot(
     // Build template context
     let ctx = TemplateContext::new(parsed_host, port, mac)
         .with_iso(action.iso)
+        .with_iso_image(iso_config.filename)
         .with_automation(action.automation)
         .with_hostname(hardware.hostname)
         .with_extra(hardware.extra);

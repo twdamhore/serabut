@@ -14,6 +14,7 @@ pub struct TemplateContext {
     pub port: u16,
     pub mac: String,
     pub iso: Option<String>,
+    pub iso_image: Option<String>,
     pub automation: Option<String>,
     pub hostname: Option<String>,
     /// Additional variables from hardware.cfg.
@@ -28,6 +29,7 @@ impl TemplateContext {
             port,
             mac,
             iso: None,
+            iso_image: None,
             automation: None,
             hostname: None,
             extra: HashMap::new(),
@@ -37,6 +39,12 @@ impl TemplateContext {
     /// Set the ISO name.
     pub fn with_iso(mut self, iso: String) -> Self {
         self.iso = Some(iso);
+        self
+    }
+
+    /// Set the ISO image filename.
+    pub fn with_iso_image(mut self, iso_image: String) -> Self {
+        self.iso_image = Some(iso_image);
         self
     }
 
@@ -107,6 +115,7 @@ impl TemplateService {
                 port => ctx.port,
                 mac => ctx.mac,
                 iso => ctx.iso,
+                iso_image => ctx.iso_image,
                 automation => ctx.automation,
                 hostname => ctx.hostname,
                 ..ctx.extra.clone()
