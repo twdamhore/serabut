@@ -123,18 +123,147 @@ To reinstall: uncomment or re-add the MAC line in `action.cfg`.
                 └── kickstart.ks.j2 # Kickstart (RHEL/Alma)
 ```
 
+## File Reference
+
+### action.cfg (Required)
+
+Maps MAC addresses to ISO and automation profile for installation.
+
+```ini
+# Format: mac=iso-name,automation-profile
+aa-bb-cc-dd-ee-ff=ubuntu-24.04,default
+11-22-33-44-55-66=alma-9.4,webserver
+
+# After installation, lines are commented out:
+# completed aa-bb-cc-dd-ee-ff on 2026-01-18T12:00:00-UTC
+# aa-bb-cc-dd-ee-ff=ubuntu-24.04,default
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| MAC address | Yes | Hyphen-separated format (aa-bb-cc-dd-ee-ff) |
+| iso-name | Yes | Must match a directory under `iso/` |
+| automation-profile | Yes | Must match a directory under `iso/{name}/automation/` |
+
+---
+
+### hardware.cfg (Required per machine)
+
+Location: `/var/lib/serabutd/config/hardware/{mac}/hardware.cfg`
+
+```ini
+hostname=server01
+role=webserver
+datacenter=dc1
+```
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `hostname` | **Yes** | Machine hostname, used in templates |
+| (any other) | No | Custom variables available as `{{ key }}` in templates |
+
+---
+
+### iso.cfg (Required per ISO)
+
+Location: `/var/lib/serabutd/config/iso/{iso-name}/iso.cfg`
+
+```ini
+filename=ubuntu-24.04-live-server-amd64.iso
+```
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `filename` | **Yes** | Name of the ISO file in the same directory |
+
+---
+
+### boot.ipxe.j2 (Required per ISO)
+
+Location: `/var/lib/serabutd/config/iso/{iso-name}/boot.ipxe.j2`
+
+iPXE script template returned by `/boot?mac={mac}`.
+
+**Ubuntu example:**
+```ipxe
+#!ipxe
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
+initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
+boot
+```
+
+**AlmaLinux/RHEL example:**
+```ipxe
+#!ipxe
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/vmlinuz ip=dhcp inst.ks=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/kickstart.ks
+initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/initrd.img
+boot
+```
+
+---
+
+### Automation Templates (Required per profile)
+
+Location: `/var/lib/serabutd/config/iso/{iso-name}/automation/{profile}/`
+
+**Ubuntu (cloud-init) - user-data.j2:**
+```yaml
+#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: {{ hostname }}
+    username: admin
+    password: $6$rounds=4096$...  # hashed password
+  ssh:
+    install-server: true
+    allow-pw: false
+  late-commands:
+    - curtin in-target -- systemctl enable ssh
+```
+
+**Ubuntu - meta-data.j2:** (can be empty)
+```yaml
+instance-id: {{ hostname }}
+local-hostname: {{ hostname }}
+```
+
+**AlmaLinux/RHEL - kickstart.ks.j2:**
+```
+#version=RHEL9
+text
+network --bootproto=dhcp --hostname={{ hostname }}
+rootpw --iscrypted $6$rounds=4096$...
+keyboard --vckeymap=us
+lang en_US.UTF-8
+timezone UTC
+bootloader --location=mbr
+clearpart --all --initlabel
+autopart --type=lvm
+reboot
+
+%packages
+@^minimal-environment
+%end
+```
+
+---
+
 ## Template Variables
 
 Available in all `.j2` templates:
 
-| Variable | Description |
-|----------|-------------|
-| `{{ host }}` | Server hostname/IP from request |
-| `{{ port }}` | Server port |
-| `{{ mac }}` | Client MAC address |
-| `{{ iso }}` | ISO name from action.cfg |
-| `{{ automation }}` | Automation profile from action.cfg |
-| `{{ hostname }}` | Hostname from hardware.cfg |
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `{{ host }}` | Request header | Server hostname/IP |
+| `{{ port }}` | Request header | Server port |
+| `{{ mac }}` | Request query | Client MAC address |
+| `{{ iso }}` | action.cfg | ISO name |
+| `{{ automation }}` | action.cfg | Automation profile name |
+| `{{ hostname }}` | hardware.cfg | Machine hostname (**required**) |
+| `{{ <key> }}` | hardware.cfg | Any custom key from hardware.cfg |
 
 ## Configuration
 

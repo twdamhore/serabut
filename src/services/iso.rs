@@ -159,20 +159,70 @@ impl IsoService {
         }
 
         // Check if the ISO file is readable
-        match File::open(&iso_file_path) {
-            Ok(_) => {
-                tracing::info!("ISO '{}': validated successfully ({})", iso_name, filename);
-            }
-            Err(e) => {
+        if let Err(e) = File::open(&iso_file_path) {
+            tracing::warn!(
+                "ISO '{}': ISO file exists but cannot be read: {:?}: {}. \
+                Check file permissions.",
+                iso_name,
+                iso_file_path,
+                e
+            );
+            return;
+        }
+
+        // Check for boot.ipxe.j2 template
+        let boot_template = iso_path.join("boot.ipxe.j2");
+        if !boot_template.exists() {
+            tracing::warn!(
+                "ISO '{}': missing boot.ipxe.j2 at {:?}. \
+                See https://github.com/twdamhore/serabut#directory-structure for template examples.",
+                iso_name,
+                boot_template
+            );
+        }
+
+        // Check for automation directory
+        let automation_dir = iso_path.join("automation");
+        if !automation_dir.exists() {
+            tracing::warn!(
+                "ISO '{}': missing automation/ directory at {:?}. \
+                Create automation profiles (e.g., automation/default/) with user-data.j2 or kickstart.ks.j2. \
+                See https://github.com/twdamhore/serabut#directory-structure",
+                iso_name,
+                automation_dir
+            );
+        } else {
+            // Check if automation directory has any profiles
+            let profiles: Vec<_> = std::fs::read_dir(&automation_dir)
+                .ok()
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().is_dir())
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if profiles.is_empty() {
                 tracing::warn!(
-                    "ISO '{}': ISO file exists but cannot be read: {:?}: {}. \
-                    Check file permissions.",
-                    iso_name,
-                    iso_file_path,
-                    e
+                    "ISO '{}': automation/ directory is empty. \
+                    Create profile subdirectories (e.g., automation/default/) with templates. \
+                    See https://github.com/twdamhore/serabut#directory-structure",
+                    iso_name
                 );
+            } else {
+                for profile in &profiles {
+                    let profile_name = profile.file_name();
+                    tracing::info!(
+                        "ISO '{}': found automation profile '{}'",
+                        iso_name,
+                        profile_name.to_string_lossy()
+                    );
+                }
             }
         }
+
+        tracing::info!("ISO '{}': validated successfully ({})", iso_name, filename);
     }
 
     /// Get the path to an ISO directory.
