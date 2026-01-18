@@ -223,6 +223,53 @@ sudo systemctl reload serabut
 SIGHUP reloads configuration (serabut.conf) without restart.
 Does not affect in-flight requests.
 
+## Code Structure
+
+```
+src/
+  main.rs           → entry point, signal handling, server startup
+  config.rs         → serabut.conf parsing, reload logic
+  routes/
+    mod.rs          → router setup
+    boot.rs         → GET /boot handler
+    iso.rs          → GET /iso handler
+    action.rs       → GET /action/remove handler
+  services/
+    mod.rs
+    action.rs       → action.cfg read/write with file locking
+    hardware.rs     → hardware.cfg parsing
+    iso.rs          → iso.cfg parsing, cdfs reading
+    template.rs     → MiniJinja rendering
+  error.rs          → error types, conversions
+```
+
+## Code Quality
+
+**SOLID Principles:**
+- Single Responsibility: each module handles one concern
+- Open/Closed: traits for testability (e.g., file system abstraction)
+- Liskov Substitution: consistent error handling across modules
+- Interface Segregation: small, focused traits
+- Dependency Inversion: handlers depend on abstractions, not concrete implementations
+
+**Guidelines:**
+- Files: < 300 lines preferred, split if larger
+- Functions: < 50 lines preferred, extract helpers if larger
+- No functions < 3 lines unless trivially clear
+- All public functions documented
+- Error messages include context (file path, MAC address, etc.)
+
+**Testing:**
+- Unit tests in each module (`#[cfg(test)]`)
+- Integration tests in `tests/`
+- Mock file system for testing without real files
+- Target: > 80% code coverage
+
+```
+make test           # run tests
+make coverage       # run tests with coverage report
+```
+
 ## Tech Stack
 
 - Rust
