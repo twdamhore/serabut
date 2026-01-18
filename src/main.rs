@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::Notify;
+use tracing_appender::rolling;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/serabutd.conf";
@@ -30,13 +31,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::new(config_path.clone())?;
     let config = state.config().await;
 
-    // Initialize logging
+    // Initialize logging to /var/log/serabut/ with daily rotation
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(config.tracing_filter()));
+
+    let file_appender = rolling::daily("/var/log/serabut", "serabutd.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_writer(non_blocking)
         .init();
 
     tracing::info!("Starting serabutd PXE boot server");
