@@ -16,6 +16,7 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=/var/lib/serabutd
 PrivateTmp=yes
+LogsDirectory=serabut
 
 [Install]
 WantedBy=multi-user.target
