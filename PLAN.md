@@ -104,12 +104,12 @@ boot
 ## Template Variables
 
 Available in all templates:
-- `{{ host }}` - server hostname/IP
-- `{{ port }}` - server port
+- `{{ host }}` - from request Host header
+- `{{ port }}` - from request Host header (or config default)
 - `{{ mac }}` - client MAC address
 - `{{ iso }}` - ISO name from action.cfg
 - `{{ automation }}` - automation name from action.cfg
-- `{{ hostname }}` - from hardware.cfg (if exists)
+- `{{ hostname }}` - from hardware.cfg (required, 500 if missing)
 
 ## Flows
 
@@ -200,6 +200,28 @@ Log entries:
 - Each request: method, path, mac (if present), response status
 - Action remove: mac, timestamp
 - Errors: template rendering, ISO read failures, file not found
+
+## Error Handling
+
+- Missing hardware.cfg for MAC → 500 error, log error
+- Missing iso.cfg → 500 error
+- Template rendering failure → 500 error
+- ISO file not found → 404
+- File inside ISO not found → 404
+
+## File Locking
+
+action.cfg uses file locking for concurrent `/action/remove` requests.
+Multiple machines booting simultaneously won't corrupt the file.
+
+## Reload
+
+```
+sudo systemctl reload serabut
+```
+
+SIGHUP reloads configuration (serabut.conf) without restart.
+Does not affect in-flight requests.
 
 ## Tech Stack
 
