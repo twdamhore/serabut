@@ -5,6 +5,8 @@ After=network.target
 
 [Service]
 Type=simple
+User=serabut
+Group=serabut
 ExecStart=/usr/local/bin/serabutd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
