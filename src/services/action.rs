@@ -36,6 +36,7 @@ impl ActionService {
     /// Look up a MAC address in action.cfg.
     ///
     /// Returns None if MAC is not found or is commented out.
+    /// If there are duplicate entries, uses the last one and logs a warning.
     pub fn lookup(&self, mac: &str) -> AppResult<Option<Action>> {
         let path = self.action_cfg_path();
 
@@ -55,6 +56,8 @@ impl ActionService {
         })?;
 
         let reader = BufReader::new(&file);
+        let mut matches: Vec<Action> = Vec::new();
+
         for line in reader.lines() {
             let line = line.map_err(|e| AppError::FileRead {
                 path: path.clone(),
@@ -62,11 +65,21 @@ impl ActionService {
             })?;
 
             if let Some(action) = parse_action_line(&line, mac) {
-                return Ok(Some(action));
+                matches.push(action);
             }
         }
 
-        Ok(None)
+        if matches.len() > 1 {
+            tracing::warn!(
+                "Duplicate MAC entries found in action.cfg for {}: {} entries. Using last one: iso={}, automation={}",
+                mac,
+                matches.len(),
+                matches.last().unwrap().iso,
+                matches.last().unwrap().automation
+            );
+        }
+
+        Ok(matches.pop())
     }
 
     /// Mark a MAC address as completed in action.cfg.
@@ -292,5 +305,26 @@ mod tests {
         let service = ActionService::new(dir.path().to_path_buf());
         let result = service.mark_completed("aa-bb-cc-dd-ee-ff").unwrap();
         assert!(!result);
+    }
+
+    #[test]
+    fn test_lookup_duplicate_mac_uses_last() {
+        let dir = setup_test_dir();
+        std::fs::write(
+            dir.path().join("action.cfg"),
+            "aa-bb-cc-dd-ee-ff=ubuntu-22.04,minimal\naa-bb-cc-dd-ee-ff=ubuntu-24.04,docker\n",
+        )
+        .unwrap();
+
+        let service = ActionService::new(dir.path().to_path_buf());
+        let result = service.lookup("aa-bb-cc-dd-ee-ff").unwrap();
+        assert_eq!(
+            result,
+            Some(Action {
+                mac: "aa-bb-cc-dd-ee-ff".to_string(),
+                iso: "ubuntu-24.04".to_string(),
+                automation: "docker".to_string(),
+            })
+        );
     }
 }
