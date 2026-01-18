@@ -184,10 +184,19 @@ Location: `/var/lib/serabutd/iso/{iso-name}/boot.ipxe.j2`
 
 iPXE script template returned by `/boot?mac={mac}`.
 
-**Ubuntu example:**
+**Ubuntu autoinstall example:**
 ```ipxe
 #!ipxe
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
+initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
+imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+boot
+```
+
+**Ubuntu manual installation example:**
+```ipxe
+#!ipxe
+kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp url=http://{{ host }}:{{ port }}/iso/{{ iso }}/{{ iso_image }} cloud-config-url=/dev/null
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
 imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
 boot
@@ -260,7 +269,8 @@ Available in all `.j2` templates:
 | `{{ host }}` | Request header | Server hostname/IP |
 | `{{ port }}` | Request header | Server port |
 | `{{ mac }}` | Request query | Client MAC address |
-| `{{ iso }}` | action.cfg | ISO name |
+| `{{ iso }}` | action.cfg | ISO name (directory name) |
+| `{{ iso_image }}` | iso.cfg | ISO filename from `filename=` |
 | `{{ automation }}` | action.cfg | Automation profile name |
 | `{{ hostname }}` | hardware.cfg | Machine hostname (**required**) |
 | `{{ <key> }}` | hardware.cfg | Any custom key from hardware.cfg |
