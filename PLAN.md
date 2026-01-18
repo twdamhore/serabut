@@ -155,9 +155,56 @@ Available in all templates:
 3. Flow 2 takes over
 ```
 
+## Configuration
+
+### /etc/serabut.conf
+
+```
+interface=0.0.0.0
+port=4123
+log_level=info
+```
+
+Defaults: all interfaces, port 4123, info logging
+
+Log levels:
+- `error` - only errors
+- `warn` - errors + warnings
+- `info` - errors + warnings + requests (including 404s)
+- `debug` - everything (template rendering, config parsing, etc.)
+
+## Installation
+
+```
+make            # build
+sudo make install   # install binary + systemd service + default config
+sudo make uninstall # remove
+```
+
+Installs:
+- `/usr/local/bin/serabut`
+- `/etc/systemd/system/serabut.service`
+- `/etc/serabut.conf` (if not exists)
+- `/var/lib/serabut/config/` (directory structure)
+
+## Logging
+
+Logs to stdout (captured by journald when running as service).
+
+```
+journalctl -u serabut -f
+```
+
+Log entries:
+- Startup: interface, port
+- Each request: method, path, mac (if present), response status
+- Action remove: mac, timestamp
+- Errors: template rendering, ISO read failures, file not found
+
 ## Tech Stack
 
 - Rust
 - MiniJinja for templating
 - cdfs for reading ISO files without mounting
 - axum for HTTP server
+- tracing for logging
