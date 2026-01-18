@@ -5,6 +5,8 @@ INSTALL_DIR = /usr/local/bin
 CONFIG_DIR = /etc
 DATA_DIR = /var/lib/serabutd/config
 SYSTEMD_DIR = /etc/systemd/system
+LOGROTATE_DIR = /etc/logrotate.d
+LOG_DIR = /var/log/serabut
 
 all: build
 
@@ -39,6 +41,10 @@ install: release
 		echo "Creating empty action.cfg..."; \
 		touch $(DATA_DIR)/action.cfg; \
 	fi
+	@echo "Creating log directory..."
+	install -dm755 $(LOG_DIR)
+	@echo "Installing logrotate config..."
+	install -Dm644 deploy/serabutd.logrotate $(LOGROTATE_DIR)/serabutd
 	@echo "Reloading systemd..."
 	systemctl daemon-reload
 	@echo "Installation complete!"
@@ -54,9 +60,10 @@ uninstall:
 	@echo "Removing files..."
 	rm -f $(INSTALL_DIR)/$(BINARY_NAME)
 	rm -f $(SYSTEMD_DIR)/serabutd.service
+	rm -f $(LOGROTATE_DIR)/serabutd
 	systemctl daemon-reload
 	@echo "Uninstall complete!"
-	@echo "Note: Config and data files in $(CONFIG_DIR) and $(DATA_DIR) were preserved."
+	@echo "Note: Config, data, and log files were preserved."
 
 clean:
 	cargo clean
