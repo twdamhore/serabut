@@ -30,7 +30,7 @@ pub async fn handle_boot(
     let mac = normalize_mac(&query.mac)?;
     let config = state.config().await;
 
-    tracing::debug!("Boot request for MAC: {}", mac);
+    tracing::info!("Boot request for MAC: {}", mac);
 
     // Look up MAC in action.cfg
     let action_service = ActionService::new(config.config_path.clone());
@@ -68,6 +68,11 @@ pub async fn handle_boot(
     // Parse host and port from Host header
     let (parsed_host, port) = parse_host_header(host, config.port);
 
+    tracing::info!(
+        "Boot response for MAC {}: server={}:{}, file={}",
+        mac, parsed_host, port, action.iso
+    );
+
     // Build template context
     let ctx = TemplateContext::new(parsed_host, port, mac)
         .with_iso(action.iso)
@@ -78,8 +83,6 @@ pub async fn handle_boot(
     // Render template
     let template_service = TemplateService::new();
     let rendered = template_service.render_file(&template_path, &ctx)?;
-
-    tracing::debug!("Rendered boot template successfully");
 
     Ok((
         StatusCode::OK,
