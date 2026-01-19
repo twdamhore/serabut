@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- Remove `network_interface` field from hardware configuration
+
 ## [0.1.0] - 2026-01-18
 
 ### Added
@@ -17,8 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ISO file serving directly from ISO images without mounting
 - Template rendering with Jinja2-style syntax (minijinja)
 - Hardware configuration per MAC address
-  - Hostname configuration
-  - Network interface specification (mandatory)
+  - Hostname configuration (mandatory)
   - Timezone configuration (optional)
   - Machine ID configuration (optional)
   - SSH host keys (ECDSA, Ed25519, RSA - optional)

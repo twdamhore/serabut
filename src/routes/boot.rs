@@ -81,7 +81,6 @@ pub async fn handle_boot(
         .with_iso_image(iso_config.filename)
         .with_automation(action.automation)
         .with_hostname(hardware.hostname)
-        .with_network_interface(hardware.network_interface)
         .with_extra(hardware.extra);
 
     if let Some(machine_id) = hardware.machine_id {
