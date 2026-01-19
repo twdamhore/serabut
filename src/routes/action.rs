@@ -1,31 +1,24 @@
 //! Action endpoint handler.
 //!
-//! GET /action/remove?mac={mac}
+//! GET /action/remove/{mac}
 //! Marks a MAC address as completed in action.cfg.
 
 use crate::config::AppState;
 use crate::error::AppError;
 use crate::services::ActionService;
 use crate::utils::normalize_mac;
-use axum::extract::{Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
 
-/// Query parameters for the action/remove endpoint.
-#[derive(Debug, Deserialize)]
-pub struct RemoveQuery {
-    pub mac: String,
-}
-
-/// Handle GET /action/remove?mac={mac}
+/// Handle GET /action/remove/{mac}
 ///
 /// Comments out the MAC entry in action.cfg with a completion timestamp.
 pub async fn handle_remove(
     State(state): State<AppState>,
-    Query(query): Query<RemoveQuery>,
+    Path(mac): Path<String>,
 ) -> Result<Response, AppError> {
-    let mac = normalize_mac(&query.mac)?;
+    let mac = normalize_mac(&mac)?;
     let config = state.config().await;
 
     tracing::info!("Remove request for MAC: {}", mac);
