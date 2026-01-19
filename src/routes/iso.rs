@@ -211,9 +211,11 @@ fn parse_host_header(host: &str, default_port: u16) -> (String, u16) {
 fn guess_content_type(path: &str) -> &'static str {
     if path.ends_with(".iso") {
         "application/octet-stream"
-    } else if path.ends_with(".j2") || path.ends_with(".yaml") || path.ends_with(".yml") {
-        "text/plain; charset=utf-8"
-    } else if path.ends_with(".ks") {
+    } else if path.ends_with(".j2")
+        || path.ends_with(".yaml")
+        || path.ends_with(".yml")
+        || path.ends_with(".ks")
+    {
         "text/plain; charset=utf-8"
     } else if path.ends_with(".json") {
         "application/json"
