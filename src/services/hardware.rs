@@ -12,7 +12,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct HardwareConfig {
     pub hostname: String,
-    pub network_interface: String,
     /// Optional machine identifier.
     pub machine_id: Option<String>,
     /// Optional timezone (e.g., "America/New_York").
@@ -69,7 +68,6 @@ impl HardwareService {
 
         let reader = BufReader::new(file);
         let mut hostname = None;
-        let mut network_interface = None;
         let mut machine_id = None;
         let mut timezone = None;
         let mut base64_ssh_host_key_ecdsa_public = None;
@@ -89,7 +87,6 @@ impl HardwareService {
             if let Some((key, value)) = parse_config_line(&line) {
                 match key {
                     "hostname" => hostname = Some(value.to_string()),
-                    "network_interface" => network_interface = Some(value.to_string()),
                     "machine_id" => machine_id = Some(value.to_string()),
                     "timezone" => timezone = Some(value.to_string()),
                     "base64_ssh_host_key_ecdsa_public" => base64_ssh_host_key_ecdsa_public = Some(value.to_string()),
@@ -108,14 +105,8 @@ impl HardwareService {
             message: "Missing required 'hostname' field".to_string(),
         })?;
 
-        let network_interface = network_interface.ok_or_else(|| AppError::ConfigParse {
-            path: path.clone(),
-            message: "Missing required 'network_interface' field".to_string(),
-        })?;
-
         Ok(HardwareConfig {
             hostname,
-            network_interface,
             machine_id,
             timezone,
             base64_ssh_host_key_ecdsa_public,
@@ -167,7 +158,7 @@ mod tests {
         std::fs::create_dir_all(&hardware_dir).unwrap();
         std::fs::write(
             hardware_dir.join("hardware.cfg"),
-            "hostname=server01\nnetwork_interface=eth0\nrole=webserver\n",
+            "hostname=server01\nrole=webserver\n",
         )
         .unwrap();
 
@@ -175,7 +166,6 @@ mod tests {
         let config = service.load(mac).unwrap();
 
         assert_eq!(config.hostname, "server01");
-        assert_eq!(config.network_interface, "eth0");
         assert_eq!(config.machine_id, None);
         assert_eq!(config.extra.get("role"), Some(&"webserver".to_string()));
     }
@@ -188,7 +178,7 @@ mod tests {
         std::fs::create_dir_all(&hardware_dir).unwrap();
         std::fs::write(
             hardware_dir.join("hardware.cfg"),
-            "hostname=server01\nnetwork_interface=eth0\nmachine_id=srv-001\nrole=webserver\n",
+            "hostname=server01\nmachine_id=srv-001\nrole=webserver\n",
         )
         .unwrap();
 
@@ -196,7 +186,6 @@ mod tests {
         let config = service.load(mac).unwrap();
 
         assert_eq!(config.hostname, "server01");
-        assert_eq!(config.network_interface, "eth0");
         assert_eq!(config.machine_id, Some("srv-001".to_string()));
         assert_eq!(config.extra.get("role"), Some(&"webserver".to_string()));
     }
@@ -210,7 +199,6 @@ mod tests {
         std::fs::write(
             hardware_dir.join("hardware.cfg"),
             "hostname=server01\n\
-             network_interface=enp0s3\n\
              base64_ssh_host_key_ed25519_public=QUFBQUI=\n\
              base64_ssh_host_key_ed25519_private=QkJCQkI=\n",
         )
@@ -220,25 +208,10 @@ mod tests {
         let config = service.load(mac).unwrap();
 
         assert_eq!(config.hostname, "server01");
-        assert_eq!(config.network_interface, "enp0s3");
         assert_eq!(config.base64_ssh_host_key_ed25519_public, Some("QUFBQUI=".to_string()));
         assert_eq!(config.base64_ssh_host_key_ed25519_private, Some("QkJCQkI=".to_string()));
         assert_eq!(config.base64_ssh_host_key_ecdsa_public, None);
         assert_eq!(config.base64_ssh_host_key_rsa_public, None);
-    }
-
-    #[test]
-    fn test_load_hardware_config_missing_network_interface() {
-        let dir = setup_test_dir();
-        let mac = "aa-bb-cc-dd-ee-ff";
-        let hardware_dir = dir.path().join("hardware").join(mac);
-        std::fs::create_dir_all(&hardware_dir).unwrap();
-        std::fs::write(hardware_dir.join("hardware.cfg"), "hostname=server01\n").unwrap();
-
-        let service = HardwareService::new(dir.path().to_path_buf());
-        let result = service.load(mac);
-
-        assert!(matches!(result, Err(AppError::ConfigParse { .. })));
     }
 
     #[test]
