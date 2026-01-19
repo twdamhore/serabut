@@ -288,6 +288,13 @@ Available in all `.j2` templates:
 | `{{ base64_ssh_host_key_*_private }}` | hardware.cfg | Base64 SSH private host keys (if set) |
 | `{{ <key> }}` | hardware.cfg | Any custom key from hardware.cfg |
 
+### Template Filters
+
+| Filter | Description | Example |
+|--------|-------------|---------|
+| `b64decode` | Decode base64 string to UTF-8 | `{{ base64_ssh_host_key_ed25519_public \| b64decode }}` |
+| `b64encode` | Encode string to base64 | `{{ hostname \| b64encode }}` |
+
 ## Configuration
 
 `/etc/serabutd.conf`:
