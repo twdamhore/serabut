@@ -12,6 +12,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct HardwareConfig {
     pub hostname: String,
+    /// Optional machine identifier.
+    pub machine_id: Option<String>,
     /// Additional key-value pairs from hardware.cfg.
     pub extra: HashMap<String, String>,
 }
@@ -57,6 +59,7 @@ impl HardwareService {
 
         let reader = BufReader::new(file);
         let mut hostname = None;
+        let mut machine_id = None;
         let mut extra = HashMap::new();
 
         for line in reader.lines() {
@@ -68,6 +71,8 @@ impl HardwareService {
             if let Some((key, value)) = parse_config_line(&line) {
                 if key == "hostname" {
                     hostname = Some(value.to_string());
+                } else if key == "machine_id" {
+                    machine_id = Some(value.to_string());
                 } else {
                     extra.insert(key.to_string(), value.to_string());
                 }
@@ -79,7 +84,7 @@ impl HardwareService {
             message: "Missing required 'hostname' field".to_string(),
         })?;
 
-        Ok(HardwareConfig { hostname, extra })
+        Ok(HardwareConfig { hostname, machine_id, extra })
     }
 }
 
@@ -129,6 +134,27 @@ mod tests {
         let config = service.load(mac).unwrap();
 
         assert_eq!(config.hostname, "server01");
+        assert_eq!(config.machine_id, None);
+        assert_eq!(config.extra.get("role"), Some(&"webserver".to_string()));
+    }
+
+    #[test]
+    fn test_load_hardware_config_with_machine_id() {
+        let dir = setup_test_dir();
+        let mac = "aa-bb-cc-dd-ee-ff";
+        let hardware_dir = dir.path().join("hardware").join(mac);
+        std::fs::create_dir_all(&hardware_dir).unwrap();
+        std::fs::write(
+            hardware_dir.join("hardware.cfg"),
+            "hostname=server01\nmachine_id=srv-001\nrole=webserver\n",
+        )
+        .unwrap();
+
+        let service = HardwareService::new(dir.path().to_path_buf());
+        let config = service.load(mac).unwrap();
+
+        assert_eq!(config.hostname, "server01");
+        assert_eq!(config.machine_id, Some("srv-001".to_string()));
         assert_eq!(config.extra.get("role"), Some(&"webserver".to_string()));
     }
 
