@@ -88,7 +88,10 @@ touch automation/default/meta-data.j2
 ```bash
 # Create hardware config for each machine (use MAC with hyphens)
 mkdir -p /var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff
-echo "hostname=server01" > /var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff/hardware.cfg
+cat > /var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff/hardware.cfg << 'EOF'
+hostname=server01
+network_interface=eth0
+EOF
 ```
 
 ### 3. Schedule Installation
@@ -111,7 +114,7 @@ To reinstall: uncomment or re-add the MAC line in `action.cfg`.
 ├── action.cfg                     # MAC → ISO,profile mappings
 ├── hardware/
 │   └── {mac}/
-│       └── hardware.cfg           # hostname=xxx
+│       └── hardware.cfg           # hostname, network_interface, etc.
 └── iso/
     └── {iso-name}/
         ├── iso.cfg                # filename=xxx.iso
@@ -153,13 +156,24 @@ Location: `/var/lib/serabutd/hardware/{mac}/hardware.cfg`
 
 ```ini
 hostname=server01
+network_interface=eth0
+timezone=America/New_York
+machine_id=srv-001
 role=webserver
-datacenter=dc1
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `hostname` | **Yes** | Machine hostname, used in templates |
+| `hostname` | **Yes** | Machine hostname |
+| `network_interface` | **Yes** | Primary network interface (e.g., `eth0`, `enp0s3`) |
+| `timezone` | No | Timezone (e.g., `America/New_York`, `UTC`) |
+| `machine_id` | No | Machine identifier for tracking |
+| `base64_ssh_host_key_ecdsa_public` | No | Base64-encoded ECDSA public host key |
+| `base64_ssh_host_key_ecdsa_private` | No | Base64-encoded ECDSA private host key |
+| `base64_ssh_host_key_ed25519_public` | No | Base64-encoded Ed25519 public host key |
+| `base64_ssh_host_key_ed25519_private` | No | Base64-encoded Ed25519 private host key |
+| `base64_ssh_host_key_rsa_public` | No | Base64-encoded RSA public host key |
+| `base64_ssh_host_key_rsa_private` | No | Base64-encoded RSA private host key |
 | (any other) | No | Custom variables available as `{{ key }}` in templates |
 
 ---
@@ -273,6 +287,11 @@ Available in all `.j2` templates:
 | `{{ iso_image }}` | iso.cfg | ISO filename from `filename=` |
 | `{{ automation }}` | action.cfg | Automation profile name |
 | `{{ hostname }}` | hardware.cfg | Machine hostname (**required**) |
+| `{{ network_interface }}` | hardware.cfg | Network interface (**required**) |
+| `{{ timezone }}` | hardware.cfg | Timezone (if set) |
+| `{{ machine_id }}` | hardware.cfg | Machine identifier (if set) |
+| `{{ base64_ssh_host_key_*_public }}` | hardware.cfg | Base64 SSH public host keys (if set) |
+| `{{ base64_ssh_host_key_*_private }}` | hardware.cfg | Base64 SSH private host keys (if set) |
 | `{{ <key> }}` | hardware.cfg | Any custom key from hardware.cfg |
 
 ## Configuration
