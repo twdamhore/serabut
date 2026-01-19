@@ -7,6 +7,7 @@ use crate::config::AppState;
 use crate::error::{AppError, AppResult};
 use crate::services::template::TemplateContext;
 use crate::services::{HardwareService, IsoService, TemplateService};
+use crate::utils::{normalize_mac, parse_host_header};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -170,41 +171,6 @@ fn extract_automation_and_mac(path: &str, query_mac: Option<&str>) -> AppResult<
     Err(AppError::InvalidMac {
         mac: "missing".to_string(),
     })
-}
-
-/// Normalize MAC address to lowercase with hyphens.
-fn normalize_mac(mac: &str) -> AppResult<String> {
-    let mac = mac.trim().to_lowercase();
-    let normalized = mac.replace(':', "-");
-
-    if !is_valid_mac(&normalized) {
-        return Err(AppError::InvalidMac { mac });
-    }
-
-    Ok(normalized)
-}
-
-/// Check if a string is a valid MAC address.
-fn is_valid_mac(mac: &str) -> bool {
-    let parts: Vec<&str> = mac.split('-').collect();
-
-    if parts.len() != 6 {
-        return false;
-    }
-
-    parts
-        .iter()
-        .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
-/// Parse host and port from Host header.
-fn parse_host_header(host: &str, default_port: u16) -> (String, u16) {
-    if let Some((h, p)) = host.rsplit_once(':') {
-        if let Ok(port) = p.parse::<u16>() {
-            return (h.to_string(), port);
-        }
-    }
-    (host.to_string(), default_port)
 }
 
 /// Guess content type from file extension.
