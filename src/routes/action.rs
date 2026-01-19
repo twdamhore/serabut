@@ -4,8 +4,9 @@
 //! Marks a MAC address as completed in action.cfg.
 
 use crate::config::AppState;
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use crate::services::ActionService;
+use crate::utils::normalize_mac;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -41,57 +42,3 @@ pub async fn handle_remove(
     }
 }
 
-/// Normalize MAC address to lowercase with hyphens.
-fn normalize_mac(mac: &str) -> AppResult<String> {
-    let mac = mac.trim().to_lowercase();
-    let normalized = mac.replace(':', "-");
-
-    if !is_valid_mac(&normalized) {
-        return Err(AppError::InvalidMac { mac });
-    }
-
-    Ok(normalized)
-}
-
-/// Check if a string is a valid MAC address.
-fn is_valid_mac(mac: &str) -> bool {
-    let parts: Vec<&str> = mac.split('-').collect();
-
-    if parts.len() != 6 {
-        return false;
-    }
-
-    parts
-        .iter()
-        .all(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_hexdigit()))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_normalize_mac() {
-        assert_eq!(
-            normalize_mac("AA-BB-CC-DD-EE-FF").unwrap(),
-            "aa-bb-cc-dd-ee-ff"
-        );
-        assert_eq!(
-            normalize_mac("aa:bb:cc:dd:ee:ff").unwrap(),
-            "aa-bb-cc-dd-ee-ff"
-        );
-    }
-
-    #[test]
-    fn test_normalize_mac_invalid() {
-        assert!(normalize_mac("invalid").is_err());
-        assert!(normalize_mac("aa-bb-cc").is_err());
-    }
-
-    #[test]
-    fn test_is_valid_mac() {
-        assert!(is_valid_mac("aa-bb-cc-dd-ee-ff"));
-        assert!(!is_valid_mac("invalid"));
-        assert!(!is_valid_mac("aa-bb-cc-dd-ee"));
-    }
-}

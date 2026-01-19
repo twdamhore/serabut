@@ -6,6 +6,7 @@ mod config;
 mod error;
 mod routes;
 mod services;
+mod utils;
 
 use config::AppState;
 use services::iso::IsoService;
