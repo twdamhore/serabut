@@ -85,6 +85,9 @@ pub async fn handle_boot(
     if let Some(machine_id) = hardware.machine_id {
         ctx = ctx.with_machine_id(machine_id);
     }
+    if let Some(timezone) = hardware.timezone {
+        ctx = ctx.with_timezone(timezone);
+    }
     if let Some(key) = hardware.base64_ssh_host_key_ecdsa_public {
         ctx = ctx.with_base64_ssh_host_key_ecdsa_public(key);
     }

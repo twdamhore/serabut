@@ -18,6 +18,7 @@ pub struct TemplateContext {
     pub automation: Option<String>,
     pub hostname: Option<String>,
     pub machine_id: Option<String>,
+    pub timezone: Option<String>,
     /// Base64-encoded SSH host keys.
     pub base64_ssh_host_key_ecdsa_public: Option<String>,
     pub base64_ssh_host_key_ecdsa_private: Option<String>,
@@ -41,6 +42,7 @@ impl TemplateContext {
             automation: None,
             hostname: None,
             machine_id: None,
+            timezone: None,
             base64_ssh_host_key_ecdsa_public: None,
             base64_ssh_host_key_ecdsa_private: None,
             base64_ssh_host_key_ed25519_public: None,
@@ -78,6 +80,12 @@ impl TemplateContext {
     /// Set the machine ID.
     pub fn with_machine_id(mut self, machine_id: String) -> Self {
         self.machine_id = Some(machine_id);
+        self
+    }
+
+    /// Set the timezone.
+    pub fn with_timezone(mut self, timezone: String) -> Self {
+        self.timezone = Some(timezone);
         self
     }
 
@@ -176,6 +184,7 @@ impl TemplateService {
                 automation => ctx.automation,
                 hostname => ctx.hostname,
                 machine_id => ctx.machine_id,
+                timezone => ctx.timezone,
                 base64_ssh_host_key_ecdsa_public => ctx.base64_ssh_host_key_ecdsa_public,
                 base64_ssh_host_key_ecdsa_private => ctx.base64_ssh_host_key_ecdsa_private,
                 base64_ssh_host_key_ed25519_public => ctx.base64_ssh_host_key_ed25519_public,

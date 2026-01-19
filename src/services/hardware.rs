@@ -14,6 +14,8 @@ pub struct HardwareConfig {
     pub hostname: String,
     /// Optional machine identifier.
     pub machine_id: Option<String>,
+    /// Optional timezone (e.g., "America/New_York").
+    pub timezone: Option<String>,
     /// Base64-encoded SSH host keys.
     pub base64_ssh_host_key_ecdsa_public: Option<String>,
     pub base64_ssh_host_key_ecdsa_private: Option<String>,
@@ -67,6 +69,7 @@ impl HardwareService {
         let reader = BufReader::new(file);
         let mut hostname = None;
         let mut machine_id = None;
+        let mut timezone = None;
         let mut base64_ssh_host_key_ecdsa_public = None;
         let mut base64_ssh_host_key_ecdsa_private = None;
         let mut base64_ssh_host_key_ed25519_public = None;
@@ -85,6 +88,7 @@ impl HardwareService {
                 match key {
                     "hostname" => hostname = Some(value.to_string()),
                     "machine_id" => machine_id = Some(value.to_string()),
+                    "timezone" => timezone = Some(value.to_string()),
                     "base64_ssh_host_key_ecdsa_public" => base64_ssh_host_key_ecdsa_public = Some(value.to_string()),
                     "base64_ssh_host_key_ecdsa_private" => base64_ssh_host_key_ecdsa_private = Some(value.to_string()),
                     "base64_ssh_host_key_ed25519_public" => base64_ssh_host_key_ed25519_public = Some(value.to_string()),
@@ -104,6 +108,7 @@ impl HardwareService {
         Ok(HardwareConfig {
             hostname,
             machine_id,
+            timezone,
             base64_ssh_host_key_ecdsa_public,
             base64_ssh_host_key_ecdsa_private,
             base64_ssh_host_key_ed25519_public,
