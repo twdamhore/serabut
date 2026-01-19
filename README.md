@@ -8,7 +8,7 @@ Serabut serves boot scripts and files directly from ISO images without mounting 
 
 ```
 ┌─────────────┐    DHCP/TFTP     ┌─────────────┐    HTTP      ┌─────────────┐
-│   Machine   │ ───────────────► │   dnsmasq   │ ──────────► │   serabut   │
+│   Machine   │ ───────────────► │   dnsmasq   │ ──────────►  │   serabut   │
 │  (PXE boot) │                  │  (bootstrap)│              │  (port 4123)│
 └─────────────┘                  └─────────────┘              └─────────────┘
                                                                     │
