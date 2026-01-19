@@ -17,6 +17,7 @@ pub struct TemplateContext {
     pub iso_image: Option<String>,
     pub automation: Option<String>,
     pub hostname: Option<String>,
+    pub network_interface: Option<String>,
     pub machine_id: Option<String>,
     pub timezone: Option<String>,
     /// Base64-encoded SSH host keys.
@@ -41,6 +42,7 @@ impl TemplateContext {
             iso_image: None,
             automation: None,
             hostname: None,
+            network_interface: None,
             machine_id: None,
             timezone: None,
             base64_ssh_host_key_ecdsa_public: None,
@@ -74,6 +76,12 @@ impl TemplateContext {
     /// Set the hostname.
     pub fn with_hostname(mut self, hostname: String) -> Self {
         self.hostname = Some(hostname);
+        self
+    }
+
+    /// Set the network interface.
+    pub fn with_network_interface(mut self, network_interface: String) -> Self {
+        self.network_interface = Some(network_interface);
         self
     }
 
@@ -183,6 +191,7 @@ impl TemplateService {
                 iso_image => ctx.iso_image,
                 automation => ctx.automation,
                 hostname => ctx.hostname,
+                network_interface => ctx.network_interface,
                 machine_id => ctx.machine_id,
                 timezone => ctx.timezone,
                 base64_ssh_host_key_ecdsa_public => ctx.base64_ssh_host_key_ecdsa_public,
