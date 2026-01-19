@@ -1,6 +1,6 @@
 //! Action endpoint handler.
 //!
-//! GET /action/remove/{mac}
+//! GET /done/{mac}
 //! Marks a MAC address as completed in action.cfg.
 
 use crate::config::AppState;
@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-/// Handle GET /action/remove/{mac}
+/// Handle GET /done/{mac}
 ///
 /// Comments out the MAC entry in action.cfg with a completion timestamp.
 pub async fn handle_remove(
