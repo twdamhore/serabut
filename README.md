@@ -257,6 +257,7 @@ autoinstall:
       - {{ ssh_key_1 }}
     allow-pw: false
   snaps: []
+  updates: all
   shutdown: reboot
 ```
 
