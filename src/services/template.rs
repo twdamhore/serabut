@@ -2,10 +2,29 @@
 //!
 //! Provides template rendering with standard variables.
 
+use base64::prelude::*;
 use crate::error::{AppError, AppResult};
-use minijinja::{context, Environment};
+use minijinja::{context, Environment, Error, ErrorKind};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// Base64 decode filter for templates.
+///
+/// Usage: `{{ value | b64decode }}`
+fn b64decode(value: String) -> Result<String, Error> {
+    let decoded = BASE64_STANDARD
+        .decode(&value)
+        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("base64 decode error: {}", e)))?;
+    String::from_utf8(decoded)
+        .map_err(|e| Error::new(ErrorKind::InvalidOperation, format!("utf8 decode error: {}", e)))
+}
+
+/// Base64 encode filter for templates.
+///
+/// Usage: `{{ value | b64encode }}`
+fn b64encode(value: String) -> String {
+    BASE64_STANDARD.encode(value.as_bytes())
+}
 
 /// Context variables for template rendering.
 #[derive(Debug, Clone)]
@@ -160,6 +179,8 @@ impl TemplateService {
         ctx: &TemplateContext,
     ) -> AppResult<String> {
         let mut env = Environment::new();
+        env.add_filter("b64decode", b64decode);
+        env.add_filter("b64encode", b64encode);
         let template_name = template_path.to_string_lossy();
 
         env.add_template(&template_name, template)
@@ -322,5 +343,71 @@ boot"#;
 
         assert!(result.contains("http://192.168.1.100:4123/action/remove?mac=aa-bb-cc-dd-ee-ff"));
         assert!(result.contains("http://192.168.1.100:4123/iso/ubuntu-24.04/casper/vmlinuz"));
+    }
+
+    #[test]
+    fn test_b64decode_filter() {
+        let service = TemplateService::new();
+        // "Hello, World!" in base64
+        let template = "{{ 'SGVsbG8sIFdvcmxkIQ==' | b64decode }}";
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string());
+
+        let result = service
+            .render_string(template, Path::new("test.j2"), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "Hello, World!");
+    }
+
+    #[test]
+    fn test_b64encode_filter() {
+        let service = TemplateService::new();
+        let template = "{{ 'Hello, World!' | b64encode }}";
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string());
+
+        let result = service
+            .render_string(template, Path::new("test.j2"), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "SGVsbG8sIFdvcmxkIQ==");
+    }
+
+    #[test]
+    fn test_b64decode_with_variable() {
+        let service = TemplateService::new();
+        let template = "{{ base64_ssh_host_key_ed25519_public | b64decode }}";
+        // "ssh-ed25519 AAAAC3..." in base64
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string())
+            .with_base64_ssh_host_key_ed25519_public("c3NoLWVkMjU1MTkgQUFBQUMz".to_string());
+
+        let result = service
+            .render_string(template, Path::new("test.j2"), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "ssh-ed25519 AAAAC3");
+    }
+
+    #[test]
+    fn test_b64decode_roundtrip() {
+        let service = TemplateService::new();
+        let template = "{{ 'test string' | b64encode | b64decode }}";
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string());
+
+        let result = service
+            .render_string(template, Path::new("test.j2"), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "test string");
+    }
+
+    #[test]
+    fn test_b64decode_invalid_base64() {
+        let service = TemplateService::new();
+        let template = "{{ 'not-valid-base64!!!' | b64decode }}";
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string());
+
+        let result = service.render_string(template, Path::new("test.j2"), &ctx);
+
+        assert!(matches!(result, Err(AppError::TemplateRender { .. })));
     }
 }
