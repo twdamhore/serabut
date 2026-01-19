@@ -75,12 +75,16 @@ pub async fn handle_boot(
     );
 
     // Build template context
-    let ctx = TemplateContext::new(parsed_host, port, mac)
+    let mut ctx = TemplateContext::new(parsed_host, port, mac)
         .with_iso(action.iso)
         .with_iso_image(iso_config.filename)
         .with_automation(action.automation)
         .with_hostname(hardware.hostname)
         .with_extra(hardware.extra);
+
+    if let Some(machine_id) = hardware.machine_id {
+        ctx = ctx.with_machine_id(machine_id);
+    }
 
     // Render template
     let template_service = TemplateService::new();

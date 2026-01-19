@@ -17,6 +17,7 @@ pub struct TemplateContext {
     pub iso_image: Option<String>,
     pub automation: Option<String>,
     pub hostname: Option<String>,
+    pub machine_id: Option<String>,
     /// Additional variables from hardware.cfg.
     pub extra: HashMap<String, String>,
 }
@@ -32,6 +33,7 @@ impl TemplateContext {
             iso_image: None,
             automation: None,
             hostname: None,
+            machine_id: None,
             extra: HashMap::new(),
         }
     }
@@ -57,6 +59,12 @@ impl TemplateContext {
     /// Set the hostname.
     pub fn with_hostname(mut self, hostname: String) -> Self {
         self.hostname = Some(hostname);
+        self
+    }
+
+    /// Set the machine ID.
+    pub fn with_machine_id(mut self, machine_id: String) -> Self {
+        self.machine_id = Some(machine_id);
         self
     }
 
@@ -118,6 +126,7 @@ impl TemplateService {
                 iso_image => ctx.iso_image,
                 automation => ctx.automation,
                 hostname => ctx.hostname,
+                machine_id => ctx.machine_id,
                 ..ctx.extra.clone()
             })
             .map_err(|e| AppError::TemplateRender {
@@ -171,6 +180,21 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, "iso=ubuntu-24.04, automation=docker, hostname=server01");
+    }
+
+    #[test]
+    fn test_render_with_machine_id() {
+        let service = TemplateService::new();
+        let template = "hostname={{ hostname }}, machine_id={{ machine_id }}";
+        let ctx = TemplateContext::new("192.168.1.1".to_string(), 4123, "aa-bb-cc-dd-ee-ff".to_string())
+            .with_hostname("server01".to_string())
+            .with_machine_id("srv-001".to_string());
+
+        let result = service
+            .render_string(template, Path::new("test.j2"), &ctx)
+            .unwrap();
+
+        assert_eq!(result, "hostname=server01, machine_id=srv-001");
     }
 
     #[test]
