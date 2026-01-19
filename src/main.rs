@@ -87,7 +87,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     // Run server with graceful shutdown
-    axum::serve(listener, app)
+    // Use into_make_service_with_connect_info to enable ConnectInfo<SocketAddr> for request logging
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(async move {
             shutdown.notified().await;
         })

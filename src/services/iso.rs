@@ -309,13 +309,35 @@ impl IsoService {
     }
 
     /// Check if a template exists for the given path.
+    ///
+    /// Handles paths with MAC addresses: automation/{profile}/{mac}/{file}
+    /// will look for template at automation/{profile}/{file}.j2
     pub fn template_path(&self, iso_name: &str, path: &str) -> Option<PathBuf> {
+        // First try direct path
         let template_path = self.iso_dir(iso_name).join(format!("{}.j2", path));
         if template_path.exists() {
-            Some(template_path)
-        } else {
-            None
+            return Some(template_path);
         }
+
+        // Check if path matches automation/{profile}/{mac}/{file}
+        // If so, try automation/{profile}/{file}.j2
+        let parts: Vec<&str> = path.split('/').collect();
+        if parts.len() >= 4 && parts[0] == "automation" {
+            // parts[0] = "automation"
+            // parts[1] = profile
+            // parts[2] = mac (skip this)
+            // parts[3..] = file path
+            let template_path_without_mac =
+                format!("automation/{}/{}", parts[1], parts[3..].join("/"));
+            let template_path = self
+                .iso_dir(iso_name)
+                .join(format!("{}.j2", template_path_without_mac));
+            if template_path.exists() {
+                return Some(template_path);
+            }
+        }
+
+        None
     }
 
     /// Read a file from within an ISO.
@@ -467,6 +489,29 @@ mod tests {
 
         let no_template = service.template_path("ubuntu-24.04", "automation/minimal/meta-data");
         assert!(no_template.is_none());
+    }
+
+    #[test]
+    fn test_template_path_with_mac_in_path() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("ubuntu-24.04");
+        let auto_dir = iso_dir.join("automation").join("default");
+        std::fs::create_dir_all(&auto_dir).unwrap();
+        std::fs::write(auto_dir.join("user-data.j2"), "template content").unwrap();
+        std::fs::write(auto_dir.join("meta-data.j2"), "meta content").unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+
+        // Path with MAC should find template without MAC
+        let template =
+            service.template_path("ubuntu-24.04", "automation/default/aa-bb-cc-dd-ee-ff/user-data");
+        assert!(template.is_some());
+        assert!(template.unwrap().ends_with("automation/default/user-data.j2"));
+
+        let template =
+            service.template_path("ubuntu-24.04", "automation/default/aa-bb-cc-dd-ee-ff/meta-data");
+        assert!(template.is_some());
+        assert!(template.unwrap().ends_with("automation/default/meta-data.j2"));
     }
 
     #[test]
