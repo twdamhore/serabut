@@ -18,6 +18,13 @@ pub struct TemplateContext {
     pub automation: Option<String>,
     pub hostname: Option<String>,
     pub machine_id: Option<String>,
+    /// Base64-encoded SSH host keys.
+    pub base64_ssh_host_key_ecdsa_public: Option<String>,
+    pub base64_ssh_host_key_ecdsa_private: Option<String>,
+    pub base64_ssh_host_key_ed25519_public: Option<String>,
+    pub base64_ssh_host_key_ed25519_private: Option<String>,
+    pub base64_ssh_host_key_rsa_public: Option<String>,
+    pub base64_ssh_host_key_rsa_private: Option<String>,
     /// Additional variables from hardware.cfg.
     pub extra: HashMap<String, String>,
 }
@@ -34,6 +41,12 @@ impl TemplateContext {
             automation: None,
             hostname: None,
             machine_id: None,
+            base64_ssh_host_key_ecdsa_public: None,
+            base64_ssh_host_key_ecdsa_private: None,
+            base64_ssh_host_key_ed25519_public: None,
+            base64_ssh_host_key_ed25519_private: None,
+            base64_ssh_host_key_rsa_public: None,
+            base64_ssh_host_key_rsa_private: None,
             extra: HashMap::new(),
         }
     }
@@ -65,6 +78,42 @@ impl TemplateContext {
     /// Set the machine ID.
     pub fn with_machine_id(mut self, machine_id: String) -> Self {
         self.machine_id = Some(machine_id);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (ECDSA public).
+    pub fn with_base64_ssh_host_key_ecdsa_public(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_ecdsa_public = Some(key);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (ECDSA private).
+    pub fn with_base64_ssh_host_key_ecdsa_private(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_ecdsa_private = Some(key);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (Ed25519 public).
+    pub fn with_base64_ssh_host_key_ed25519_public(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_ed25519_public = Some(key);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (Ed25519 private).
+    pub fn with_base64_ssh_host_key_ed25519_private(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_ed25519_private = Some(key);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (RSA public).
+    pub fn with_base64_ssh_host_key_rsa_public(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_rsa_public = Some(key);
+        self
+    }
+
+    /// Set base64-encoded SSH host key (RSA private).
+    pub fn with_base64_ssh_host_key_rsa_private(mut self, key: String) -> Self {
+        self.base64_ssh_host_key_rsa_private = Some(key);
         self
     }
 
@@ -127,6 +176,12 @@ impl TemplateService {
                 automation => ctx.automation,
                 hostname => ctx.hostname,
                 machine_id => ctx.machine_id,
+                base64_ssh_host_key_ecdsa_public => ctx.base64_ssh_host_key_ecdsa_public,
+                base64_ssh_host_key_ecdsa_private => ctx.base64_ssh_host_key_ecdsa_private,
+                base64_ssh_host_key_ed25519_public => ctx.base64_ssh_host_key_ed25519_public,
+                base64_ssh_host_key_ed25519_private => ctx.base64_ssh_host_key_ed25519_private,
+                base64_ssh_host_key_rsa_public => ctx.base64_ssh_host_key_rsa_public,
+                base64_ssh_host_key_rsa_private => ctx.base64_ssh_host_key_rsa_private,
                 ..ctx.extra.clone()
             })
             .map_err(|e| AppError::TemplateRender {

@@ -85,6 +85,24 @@ pub async fn handle_boot(
     if let Some(machine_id) = hardware.machine_id {
         ctx = ctx.with_machine_id(machine_id);
     }
+    if let Some(key) = hardware.base64_ssh_host_key_ecdsa_public {
+        ctx = ctx.with_base64_ssh_host_key_ecdsa_public(key);
+    }
+    if let Some(key) = hardware.base64_ssh_host_key_ecdsa_private {
+        ctx = ctx.with_base64_ssh_host_key_ecdsa_private(key);
+    }
+    if let Some(key) = hardware.base64_ssh_host_key_ed25519_public {
+        ctx = ctx.with_base64_ssh_host_key_ed25519_public(key);
+    }
+    if let Some(key) = hardware.base64_ssh_host_key_ed25519_private {
+        ctx = ctx.with_base64_ssh_host_key_ed25519_private(key);
+    }
+    if let Some(key) = hardware.base64_ssh_host_key_rsa_public {
+        ctx = ctx.with_base64_ssh_host_key_rsa_public(key);
+    }
+    if let Some(key) = hardware.base64_ssh_host_key_rsa_private {
+        ctx = ctx.with_base64_ssh_host_key_rsa_private(key);
+    }
 
     // Render template
     let template_service = TemplateService::new();
