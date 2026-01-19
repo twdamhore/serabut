@@ -17,7 +17,7 @@ GET /iso/{iso-name}/{path}
     → If {path}.j2 exists in config dir → render template
     → Else → stream from ISO via iso9660_simple
 
-GET /action/remove?mac={mac}
+GET /action/remove/{mac}
     → Comments out MAC line in action.cfg
     → Adds: # completed {mac} on {timestamp}-UTC
 ```
@@ -95,7 +95,7 @@ chain http://{{ host }}:{{ port }}/boot?mac=${mac:hexhyp} || sanboot --no-descri
 
 ```ipxe
 #!ipxe
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/{{ mac }}/
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
 boot

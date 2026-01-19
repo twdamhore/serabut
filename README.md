@@ -46,7 +46,7 @@ sudo systemctl enable --now serabutd
 |----------|-------------|
 | `GET /boot?mac={mac}` | Returns iPXE boot script for MAC, or 404 to boot locally |
 | `GET /iso/{iso}/{path}` | Serves files from ISO or renders templates |
-| `GET /action/remove?mac={mac}` | Marks MAC as installed (prevents reinstall loop) |
+| `GET /action/remove/{mac}` | Marks MAC as installed (prevents reinstall loop) |
 
 ## Quick Setup
 
@@ -68,7 +68,7 @@ cat > boot.ipxe.j2 << 'EOF'
 #!ipxe
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 boot
 EOF
 
@@ -198,7 +198,7 @@ iPXE script template returned by `/boot?mac={mac}`.
 #!ipxe
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp autoinstall ds=nocloud-net;s=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 boot
 ```
 
@@ -207,7 +207,7 @@ boot
 #!ipxe
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz ip=dhcp url=http://{{ host }}:{{ port }}/iso/{{ iso }}/{{ iso_image }} cloud-config-url=/dev/null
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 boot
 ```
 
@@ -216,7 +216,7 @@ boot
 #!ipxe
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/vmlinuz ip=dhcp inst.ks=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/kickstart.ks
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/initrd.img
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 boot
 ```
 

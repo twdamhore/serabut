@@ -329,7 +329,7 @@ mod tests {
     fn test_boot_ipxe_template() {
         let service = TemplateService::new();
         let template = r#"#!ipxe
-imgfetch http://{{ host }}:{{ port }}/action/remove?mac={{ mac }} ||
+imgfetch http://{{ host }}:{{ port }}/action/remove/{{ mac }} ||
 kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/vmlinuz
 initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/casper/initrd
 boot"#;
@@ -341,7 +341,7 @@ boot"#;
             .render_string(template, Path::new("boot.ipxe.j2"), &ctx)
             .unwrap();
 
-        assert!(result.contains("http://192.168.1.100:4123/action/remove?mac=aa-bb-cc-dd-ee-ff"));
+        assert!(result.contains("http://192.168.1.100:4123/action/remove/aa-bb-cc-dd-ee-ff"));
         assert!(result.contains("http://192.168.1.100:4123/iso/ubuntu-24.04/casper/vmlinuz"));
     }
 

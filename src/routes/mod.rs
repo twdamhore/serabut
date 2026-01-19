@@ -38,7 +38,7 @@ pub fn create_router(state: AppState) -> Router {
     Router::new()
         .route("/boot", get(boot::handle_boot))
         .route("/iso/{iso_name}/{*path}", get(iso::handle_iso))
-        .route("/action/remove", get(action::handle_remove))
+        .route("/action/remove/{mac}", get(action::handle_remove))
         .layer(middleware::from_fn(request_logging))
         .with_state(state)
 }
