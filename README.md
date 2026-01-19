@@ -153,13 +153,19 @@ Location: `/var/lib/serabutd/hardware/{mac}/hardware.cfg`
 
 ```ini
 hostname=server01
-role=webserver
-datacenter=dc1
+realname=John Doe
+username=admin
+password=$6$rounds=4096$salt$hashedpassword
+ssh_key_1=ssh-ed25519 AAAAC3... user@host
 ```
 
 | Key | Required | Description |
 |-----|----------|-------------|
 | `hostname` | **Yes** | Machine hostname, used in templates |
+| `realname` | No | User's display name |
+| `username` | No | Login username |
+| `password` | No | Hashed password (generate with `openssl passwd -6`) |
+| `ssh_key_1` | No | SSH public key |
 | (any other) | No | Custom variables available as `{{ key }}` in templates |
 
 ---
@@ -222,15 +228,36 @@ Location: `/var/lib/serabutd/iso/{iso-name}/automation/{profile}/`
 #cloud-config
 autoinstall:
   version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+    variant: ""
+  source:
+    id: ubuntu-server
+    search_drivers: false
+  network:
+    version: 2
+    ethernets:
+      id0:
+        match:
+          driver: "*"
+        dhcp4: true
+  proxy: ""
+  storage:
+    layout:
+      name: direct
   identity:
+    realname: {{ realname }}
     hostname: {{ hostname }}
-    username: admin
-    password: $6$rounds=4096$...  # hashed password
+    username: {{ username }}
+    password: {{ password }}
   ssh:
     install-server: true
+    authorized-keys:
+      - {{ ssh_key_1 }}
     allow-pw: false
-  late-commands:
-    - curtin in-target -- systemctl enable ssh
+  snaps: []
+  shutdown: reboot
 ```
 
 **Ubuntu - meta-data.j2:** (can be empty)
@@ -273,6 +300,10 @@ Available in all `.j2` templates:
 | `{{ iso_image }}` | iso.cfg | ISO filename from `filename=` |
 | `{{ automation }}` | action.cfg | Automation profile name |
 | `{{ hostname }}` | hardware.cfg | Machine hostname (**required**) |
+| `{{ realname }}` | hardware.cfg | User's display name |
+| `{{ username }}` | hardware.cfg | Login username |
+| `{{ password }}` | hardware.cfg | Hashed password (generate with `openssl passwd -6`) |
+| `{{ ssh_key_1 }}` | hardware.cfg | SSH public key for authorized_keys |
 | `{{ <key> }}` | hardware.cfg | Any custom key from hardware.cfg |
 
 ## Configuration
