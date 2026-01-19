@@ -4,6 +4,18 @@ HTTP server for PXE booting multiple OSes with automated installation.
 
 Serabut serves boot scripts and files directly from ISO images without mounting them. Combined with iPXE and DHCP/TFTP (e.g., dnsmasq), it enables fully automated OS installations.
 
+## Motivation
+I tried a few other PXE boot managers and they did not meet my requirements.
+I wanted:
+- Ability to re-install using official ISO image. Some solutions were using cloud images. These are still official, just that they are slightly different from installing it from ISO images.
+- Support for boxes without BMC (Baseboard Management Controller). I am too lazy to physically press a button.
+- Some implementations were tied to specific OS or OS-release. For example, it works with ubuntu 22.04 but not 24.04.
+- I am also too lazy to extract the kernel from the ISO to boot up the installation process.
+- Using `dnsmasq` and `nginx` would cover most of the things I needed but I need to manually turn on `dnsmasq` otherwise there was no state and the next reboot would re-install the ISO on the target box, again, and again.
+
+## Leverage
+I settle for using `dnsmasq` for for Proxy DHCP and the initial TFTP transfer. All other file transfer was on http and `serabut` would serve the content. There was no need to leverage on `nginx`. I would configure the MAC address and what to install on a file, and then when it is done, the final step of the installation process would call the URL endpoint that would remove the entry. The next boot would not re-start the installation process again.
+
 ## How It Works
 
 ```
