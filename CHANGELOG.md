@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-01-19
+
 ### Added
 
 - Add `b64decode` and `b64encode` template filters for base64 encoding/decoding in templates
@@ -46,5 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File locking for concurrent action.cfg access
 - Input validation for MAC addresses
 
-[Unreleased]: https://github.com/twdamhore/serabut/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/twdamhore/serabut/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/twdamhore/serabut/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/twdamhore/serabut/releases/tag/v0.1.0
