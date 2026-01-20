@@ -13,6 +13,13 @@ I wanted:
 - I am also too lazy to extract the kernel from the ISO to boot up the installation process.
 - Using `dnsmasq` and `nginx` would cover most of the things I needed but I need to manually turn on `dnsmasq` otherwise there was no state and the next reboot would re-install the ISO on the target box, again, and again.
 
+## What it does
+- ✅ I do not have to extract `vmlinuz`/`initrd`. The files are read from the `.iso` file.
+- ✅ I do not need a computer with BMC. My mini PC works. One PXE boot then `serabut` will take it from there and the next boot is from a clean installation. No physical button to press.
+- ✅ I do not tight coupling with the current OS/distro/release. The running `ldd` on the one binary, I can see 4 libraries: `linux-vdso`/`libgcc_s`/`libm`/`libc`.
+- ✅ Tested on Ubuntu 22.04/24.04/25.10.
+- ❓ To be tested on Debian and AlmaLinux and Rocky Linux.
+
 ## Leverage
 I settle for using `dnsmasq` for for Proxy DHCP and the initial TFTP transfer. All other file transfer was on http and `serabut` would serve the content. There was no need to leverage on `nginx`. I would configure the MAC address and what to install on a file, and then when it is done, the final step of the installation process would call the URL endpoint that would remove the entry. The next boot would not re-start the installation process again.
 
