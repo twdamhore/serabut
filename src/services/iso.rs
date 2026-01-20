@@ -408,6 +408,59 @@ impl IsoService {
         Err(AppError::TemplateNotFound { path: iso_path })
     }
 
+    /// Stream the ISO file itself with chunked reads for memory efficiency.
+    ///
+    /// Returns the file size and a receiver that yields chunks.
+    /// Uses spawn_blocking for the file reads with backpressure via bounded channel.
+    pub fn stream_iso_file(
+        &self,
+        iso_name: &str,
+    ) -> AppResult<(u64, mpsc::Receiver<Result<Bytes, std::io::Error>>)> {
+        let iso_path = self.iso_file_path(iso_name)?;
+
+        // Get file size
+        let metadata = std::fs::metadata(&iso_path).map_err(|e| AppError::FileRead {
+            path: iso_path.clone(),
+            source: e,
+        })?;
+        let file_size = metadata.len();
+
+        // Create bounded channel for backpressure (2 chunks max in flight)
+        let (tx, rx) = mpsc::channel(2);
+
+        // Spawn blocking task to read chunks
+        tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<(), std::io::Error> {
+                let mut file = File::open(&iso_path)?;
+                let mut offset: u64 = 0;
+
+                while offset < file_size {
+                    let remaining = file_size - offset;
+                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+
+                    let mut buffer = vec![0u8; chunk_size];
+                    file.read_exact(&mut buffer)?;
+
+                    let bytes = Bytes::from(buffer);
+                    if tx.blocking_send(Ok(bytes)).is_err() {
+                        // Receiver dropped, stop sending
+                        break;
+                    }
+
+                    offset += chunk_size as u64;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                let _ = tx.blocking_send(Err(e));
+            }
+        });
+
+        Ok((file_size, rx))
+    }
+
     /// Stream a file from within an ISO.
     ///
     /// Returns the file size and a receiver that yields chunks.
