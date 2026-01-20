@@ -13,8 +13,10 @@ use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 const ISO_BLOCK_SIZE: u64 = 2048;
-/// Chunk size for streaming (32MB)
-const CHUNK_SIZE: usize = 32 * 1024 * 1024;
+/// Chunk size for streaming (8MB).
+const CHUNK_SIZE: usize = 8 * 1024 * 1024;
+/// Channel capacity for streaming. With 8MB chunks, this allows up to 16MB in flight.
+const CHANNEL_CAPACITY: usize = 2;
 
 /// Stream file contents in chunks to a channel.
 ///
@@ -454,8 +456,8 @@ impl IsoService {
         })?;
         let file_size = metadata.len();
 
-        // Create bounded channel for backpressure (2 chunks max in flight)
-        let (tx, rx) = mpsc::channel(2);
+        // Create bounded channel for backpressure
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         // Spawn blocking task to read chunks
         tokio::task::spawn_blocking(move || {
@@ -520,8 +522,8 @@ impl IsoService {
         let file_size = entry.size;
         let extent_lba = entry.extent_lba;
 
-        // Create bounded channel for backpressure (2 chunks max in flight)
-        let (tx, rx) = mpsc::channel(2);
+        // Create bounded channel for backpressure
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let iso_path_clone = iso_path.clone();
 
@@ -636,8 +638,8 @@ impl IsoService {
             total_size
         );
 
-        // Create bounded channel for backpressure (2 chunks max in flight)
-        let (tx, rx) = mpsc::channel(2);
+        // Create bounded channel for backpressure
+        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
 
         let iso_path_clone = iso_path.clone();
         let firmware_path_clone = firmware_path.clone();
@@ -960,7 +962,7 @@ mod tests {
         std::fs::write(&test_file, &test_data).unwrap();
 
         // Create channel and stream
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let mut file = File::open(&test_file).unwrap();
         let file_size = test_data.len() as u64;
 
@@ -982,15 +984,15 @@ mod tests {
 
     #[test]
     fn test_stream_file_to_channel_multiple_chunks() {
-        // Create a file larger than CHUNK_SIZE (32MB) to test chunking
-        // 70MB = 2 full chunks (32MB each) + 1 partial chunk (6MB)
+        // Create a file larger than CHUNK_SIZE (8MB) to test chunking
+        // 20MB = 2 full chunks (8MB each) + 1 partial chunk (4MB)
         let dir = setup_test_dir();
         let test_file = dir.path().join("large.bin");
-        let file_size = 70 * 1024 * 1024; // 70MB
+        let file_size = 20 * 1024 * 1024; // 20MB
         let test_data: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
         std::fs::write(&test_file, &test_data).unwrap();
 
-        let (tx, mut rx) = mpsc::channel(2);
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let mut file = File::open(&test_file).unwrap();
 
         std::thread::spawn(move || {
@@ -1006,7 +1008,7 @@ mod tests {
             received.extend_from_slice(&bytes);
         }
 
-        assert_eq!(chunk_count, 3); // 32MB + 32MB + 6MB
+        assert_eq!(chunk_count, 3); // 8MB + 8MB + 4MB
         assert_eq!(received.len(), test_data.len());
         assert_eq!(received, test_data);
     }
