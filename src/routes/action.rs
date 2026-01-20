@@ -27,7 +27,6 @@ pub async fn handle_remove(
     let removed = action_service.mark_completed(&mac)?;
 
     if removed {
-        tracing::info!("Marked MAC {} as completed", mac);
         Ok((StatusCode::OK, "OK").into_response())
     } else {
         tracing::warn!("MAC {} not found in action.cfg", mac);

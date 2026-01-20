@@ -3,14 +3,18 @@
 //! Handles iso.cfg parsing, ISO9660 reading, and template detection.
 
 use crate::error::{AppError, AppResult};
+use bytes::Bytes;
 use gpt_disk_io::BlockIo;
 use gpt_disk_types::{BlockSize, Lba};
-use iso9660::{find_file, mount, read_file_vec};
+use iso9660::{find_file, mount};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use tokio::sync::mpsc;
 
 const ISO_BLOCK_SIZE: u64 = 2048;
+/// Chunk size for streaming (32MB)
+const CHUNK_SIZE: usize = 32 * 1024 * 1024;
 
 /// Wrapper to implement BlockIo for std::fs::File.
 struct FileBlockIo {
@@ -353,48 +357,6 @@ impl IsoService {
         None
     }
 
-    /// Read a file from within an ISO.
-    pub fn read_from_iso(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
-        let iso_path = self.iso_file_path(iso_name)?;
-
-        let file = File::open(&iso_path).map_err(|e| AppError::FileRead {
-            path: iso_path.clone(),
-            source: e,
-        })?;
-
-        let mut block_io = FileBlockIo::new(file).map_err(|e| AppError::FileRead {
-            path: iso_path.clone(),
-            source: e,
-        })?;
-
-        let volume = mount(&mut block_io, 0).map_err(|e| AppError::IsoRead {
-            path: iso_path.clone(),
-            message: format!("Failed to mount ISO: {}", e),
-        })?;
-
-        // Normalize path - ensure leading slash
-        let normalized_path = if file_path.starts_with('/') {
-            file_path.to_string()
-        } else {
-            format!("/{}", file_path)
-        };
-
-        tracing::debug!("Looking for file in ISO: {}", normalized_path);
-
-        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
-            tracing::debug!("File not found: {}", e);
-            AppError::FileNotFoundInIso {
-                iso: iso_name.to_string(),
-                path: file_path.to_string(),
-            }
-        })?;
-
-        read_file_vec(&mut block_io, &entry).map_err(|e| AppError::IsoRead {
-            path: iso_path,
-            message: format!("Failed to read file from ISO: {}", e),
-        })
-    }
-
     /// Check if firmware concatenation is configured and path matches initrd_path.
     ///
     /// Returns Some((initrd_path, firmware)) if the requested path matches initrd_path
@@ -413,43 +375,6 @@ impl IsoService {
         }
 
         Ok(None)
-    }
-
-    /// Read initrd from ISO and concatenate firmware file.
-    ///
-    /// This is used for Debian netboot where firmware needs to be appended to initrd.
-    /// See: https://wiki.debian.org/DebianInstaller/NetbootFirmware
-    pub fn read_initrd_with_firmware(
-        &self,
-        iso_name: &str,
-        initrd_path: &str,
-        firmware_filename: &str,
-    ) -> AppResult<Vec<u8>> {
-        // Read initrd from ISO
-        let mut content = self.read_from_iso(iso_name, initrd_path)?;
-
-        // Read firmware file from the iso config directory
-        let firmware_path = self.iso_dir(iso_name).join(firmware_filename);
-
-        tracing::info!(
-            "Concatenating firmware {:?} to initrd {}",
-            firmware_path,
-            initrd_path
-        );
-
-        let mut firmware_file = File::open(&firmware_path).map_err(|e| AppError::FileRead {
-            path: firmware_path.clone(),
-            source: e,
-        })?;
-
-        firmware_file
-            .read_to_end(&mut content)
-            .map_err(|e| AppError::FileRead {
-                path: firmware_path,
-                source: e,
-            })?;
-
-        Ok(content)
     }
 
     /// Get the boot template path for an ISO.
@@ -481,6 +406,234 @@ impl IsoService {
         }
 
         Err(AppError::TemplateNotFound { path: iso_path })
+    }
+
+    /// Stream a file from within an ISO.
+    ///
+    /// Returns the file size and a receiver that yields chunks.
+    /// Uses spawn_blocking for the synchronous ISO reads.
+    pub fn stream_from_iso(
+        &self,
+        iso_name: &str,
+        file_path: &str,
+    ) -> AppResult<(u64, mpsc::Receiver<Result<Bytes, std::io::Error>>)> {
+        let iso_path = self.iso_file_path(iso_name)?;
+
+        // Open ISO and find file entry to get size
+        let file = File::open(&iso_path).map_err(|e| AppError::FileRead {
+            path: iso_path.clone(),
+            source: e,
+        })?;
+
+        let mut block_io = FileBlockIo::new(file).map_err(|e| AppError::FileRead {
+            path: iso_path.clone(),
+            source: e,
+        })?;
+
+        let volume = mount(&mut block_io, 0).map_err(|e| AppError::IsoRead {
+            path: iso_path.clone(),
+            message: format!("Failed to mount ISO: {}", e),
+        })?;
+
+        // Normalize path - ensure leading slash
+        let normalized_path = if file_path.starts_with('/') {
+            file_path.to_string()
+        } else {
+            format!("/{}", file_path)
+        };
+
+        tracing::debug!("Looking for file in ISO: {}", normalized_path);
+
+        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
+            tracing::debug!("File not found in ISO: {}", e);
+            AppError::FileNotFoundInIso {
+                iso: iso_name.to_string(),
+                path: file_path.to_string(),
+            }
+        })?;
+
+        let file_size = entry.size;
+        let extent_lba = entry.extent_lba;
+
+        // Create bounded channel for backpressure (2 chunks max in flight)
+        let (tx, rx) = mpsc::channel(2);
+
+        let iso_path_clone = iso_path.clone();
+
+        // Spawn blocking task to read chunks.
+        // We re-open the ISO here because FileBlockIo contains a File handle
+        // which is not Send and cannot be moved into the spawned task.
+        tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<(), std::io::Error> {
+                let file = File::open(&iso_path_clone)?;
+                let mut block_io = FileBlockIo::new(file)?;
+
+                let mut offset: u64 = 0;
+                let total_size = file_size;
+
+                while offset < total_size {
+                    let remaining = total_size - offset;
+                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+
+                    // Calculate sector-aligned read
+                    let start_lba = extent_lba as u64 + (offset / ISO_BLOCK_SIZE);
+                    let sectors_needed = (chunk_size as u64).div_ceil(ISO_BLOCK_SIZE);
+                    let read_size = (sectors_needed * ISO_BLOCK_SIZE) as usize;
+
+                    let mut buffer = vec![0u8; read_size];
+                    block_io.read_blocks(Lba(start_lba), &mut buffer)?;
+
+                    // Truncate to actual chunk size (handle last partial chunk)
+                    buffer.truncate(chunk_size);
+
+                    let bytes = Bytes::from(buffer);
+                    if tx.blocking_send(Ok(bytes)).is_err() {
+                        // Receiver dropped, stop sending
+                        break;
+                    }
+
+                    offset += chunk_size as u64;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                let _ = tx.blocking_send(Err(e));
+            }
+        });
+
+        Ok((file_size, rx))
+    }
+
+    /// Stream initrd from ISO with firmware file concatenated.
+    ///
+    /// Returns the combined size and a receiver that yields chunks.
+    /// First streams all initrd chunks, then firmware chunks.
+    pub fn stream_initrd_with_firmware(
+        &self,
+        iso_name: &str,
+        initrd_path: &str,
+        firmware_filename: &str,
+    ) -> AppResult<(u64, mpsc::Receiver<Result<Bytes, std::io::Error>>)> {
+        let iso_path = self.iso_file_path(iso_name)?;
+        let firmware_path = self.iso_dir(iso_name).join(firmware_filename);
+
+        // Get initrd file entry for size
+        let file = File::open(&iso_path).map_err(|e| AppError::FileRead {
+            path: iso_path.clone(),
+            source: e,
+        })?;
+
+        let mut block_io = FileBlockIo::new(file).map_err(|e| AppError::FileRead {
+            path: iso_path.clone(),
+            source: e,
+        })?;
+
+        let volume = mount(&mut block_io, 0).map_err(|e| AppError::IsoRead {
+            path: iso_path.clone(),
+            message: format!("Failed to mount ISO: {}", e),
+        })?;
+
+        // Normalize path - ensure leading slash
+        let normalized_path = if initrd_path.starts_with('/') {
+            initrd_path.to_string()
+        } else {
+            format!("/{}", initrd_path)
+        };
+
+        tracing::debug!("Looking for initrd in ISO: {}", normalized_path);
+
+        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
+            tracing::debug!("Initrd not found in ISO: {}", e);
+            AppError::FileNotFoundInIso {
+                iso: iso_name.to_string(),
+                path: initrd_path.to_string(),
+            }
+        })?;
+
+        let initrd_size = entry.size;
+        let extent_lba = entry.extent_lba;
+
+        // Get firmware size
+        let firmware_metadata = std::fs::metadata(&firmware_path).map_err(|e| AppError::FileRead {
+            path: firmware_path.clone(),
+            source: e,
+        })?;
+        let firmware_size = firmware_metadata.len();
+
+        let total_size = initrd_size + firmware_size;
+
+        tracing::info!(
+            "Streaming initrd ({} bytes) + firmware ({} bytes) = {} bytes total",
+            initrd_size,
+            firmware_size,
+            total_size
+        );
+
+        // Create bounded channel for backpressure (2 chunks max in flight)
+        let (tx, rx) = mpsc::channel(2);
+
+        let iso_path_clone = iso_path.clone();
+        let firmware_path_clone = firmware_path.clone();
+
+        // Spawn blocking task to read chunks.
+        // We re-open the ISO here because FileBlockIo contains a File handle
+        // which is not Send and cannot be moved into the spawned task.
+        tokio::task::spawn_blocking(move || {
+            let result = (|| -> Result<(), std::io::Error> {
+                // Phase 1: Stream initrd from ISO
+                let file = File::open(&iso_path_clone)?;
+                let mut block_io = FileBlockIo::new(file)?;
+
+                let mut offset: u64 = 0;
+                while offset < initrd_size {
+                    let remaining = initrd_size - offset;
+                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+
+                    let start_lba = extent_lba as u64 + (offset / ISO_BLOCK_SIZE);
+                    let sectors_needed = (chunk_size as u64).div_ceil(ISO_BLOCK_SIZE);
+                    let read_size = (sectors_needed * ISO_BLOCK_SIZE) as usize;
+
+                    let mut buffer = vec![0u8; read_size];
+                    block_io.read_blocks(Lba(start_lba), &mut buffer)?;
+                    buffer.truncate(chunk_size);
+
+                    let bytes = Bytes::from(buffer);
+                    if tx.blocking_send(Ok(bytes)).is_err() {
+                        return Ok(());
+                    }
+
+                    offset += chunk_size as u64;
+                }
+
+                // Phase 2: Stream firmware from disk
+                let mut firmware_file = File::open(&firmware_path_clone)?;
+                let mut offset: u64 = 0;
+                while offset < firmware_size {
+                    let remaining = firmware_size - offset;
+                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+
+                    let mut buffer = vec![0u8; chunk_size];
+                    firmware_file.read_exact(&mut buffer)?;
+
+                    let bytes = Bytes::from(buffer);
+                    if tx.blocking_send(Ok(bytes)).is_err() {
+                        return Ok(());
+                    }
+
+                    offset += chunk_size as u64;
+                }
+
+                Ok(())
+            })();
+
+            if let Err(e) = result {
+                let _ = tx.blocking_send(Err(e));
+            }
+        });
+
+        Ok((total_size, rx))
     }
 }
 

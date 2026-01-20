@@ -14,6 +14,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use serde::Deserialize;
 use tokio::fs::File;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::io::ReaderStream;
 
 /// Query parameters for the ISO endpoint.
@@ -180,10 +181,11 @@ async fn serve_template(
         .unwrap())
 }
 
-/// Serve a file from within the ISO.
+/// Serve a file from within the ISO using streaming.
 fn serve_from_iso(iso_service: &IsoService, iso_name: &str, path: &str) -> AppResult<Response> {
-    let content = iso_service.read_from_iso(iso_name, path)?;
-    let content_length = content.len();
+    let (content_length, receiver) = iso_service.stream_from_iso(iso_name, path)?;
+    let stream = ReceiverStream::new(receiver);
+    let body = Body::from_stream(stream);
 
     // Determine content type based on file extension
     let content_type = guess_content_type(path);
@@ -192,11 +194,11 @@ fn serve_from_iso(iso_service: &IsoService, iso_name: &str, path: &str) -> AppRe
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, content_length)
-        .body(Body::from(content))
+        .body(body)
         .unwrap())
 }
 
-/// Serve initrd with firmware concatenated.
+/// Serve initrd with firmware concatenated using streaming.
 ///
 /// Used for Debian netboot where firmware.cpio.gz needs to be appended to initrd.
 fn serve_initrd_with_firmware(
@@ -205,14 +207,16 @@ fn serve_initrd_with_firmware(
     initrd_path: &str,
     firmware: &str,
 ) -> AppResult<Response> {
-    let content = iso_service.read_initrd_with_firmware(iso_name, initrd_path, firmware)?;
-    let content_length = content.len();
+    let (content_length, receiver) =
+        iso_service.stream_initrd_with_firmware(iso_name, initrd_path, firmware)?;
+    let stream = ReceiverStream::new(receiver);
+    let body = Body::from_stream(stream);
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(header::CONTENT_LENGTH, content_length)
-        .body(Body::from(content))
+        .body(body)
         .unwrap())
 }
 
