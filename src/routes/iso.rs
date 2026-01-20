@@ -13,9 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use serde::Deserialize;
-use tokio::fs::File;
 use tokio_stream::wrappers::ReceiverStream;
-use tokio_util::io::ReaderStream;
 
 /// Query parameters for the ISO endpoint.
 #[derive(Debug, Deserialize, Default)]
@@ -55,7 +53,7 @@ pub async fn handle_iso(
     // Check if this is a request for the ISO file itself
     if iso_service.is_iso_file(&iso_name, &path)? {
         tracing::info!("Serving ISO file: {}/{}", iso_name, path);
-        return serve_iso_file(&iso_service, &iso_name).await;
+        return serve_iso_file(&iso_service, &iso_name);
     }
 
     // Extract host from headers
@@ -84,22 +82,10 @@ pub async fn handle_iso(
     serve_from_iso(&iso_service, &iso_name, &path)
 }
 
-/// Serve the ISO file itself for streaming.
-async fn serve_iso_file(iso_service: &IsoService, iso_name: &str) -> AppResult<Response> {
-    let iso_path = iso_service.iso_file_path(iso_name)?;
-
-    let file = File::open(&iso_path).await.map_err(|e| AppError::FileRead {
-        path: iso_path.clone(),
-        source: e,
-    })?;
-
-    let metadata = file.metadata().await.map_err(|e| AppError::FileRead {
-        path: iso_path.clone(),
-        source: e,
-    })?;
-    let content_length = metadata.len();
-
-    let stream = ReaderStream::new(file);
+/// Serve the ISO file itself using chunked streaming for memory efficiency.
+fn serve_iso_file(iso_service: &IsoService, iso_name: &str) -> AppResult<Response> {
+    let (content_length, receiver) = iso_service.stream_iso_file(iso_name)?;
+    let stream = ReceiverStream::new(receiver);
     let body = Body::from_stream(stream);
 
     Ok(Response::builder()
