@@ -19,17 +19,16 @@ const CHUNK_SIZE: usize = 32 * 1024 * 1024;
 /// Stream file contents in chunks to a channel.
 ///
 /// Reads the file in CHUNK_SIZE chunks and sends each chunk to the channel.
-/// Returns Ok(true) if completed successfully, Ok(false) if receiver dropped.
+/// Stops early if receiver is dropped.
 fn stream_file_to_channel(
     file: &mut File,
     file_size: u64,
     tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
-) -> Result<bool, std::io::Error> {
-    let mut offset: u64 = 0;
+) -> Result<(), std::io::Error> {
+    let mut bytes_remaining = file_size as usize;
 
-    while offset < file_size {
-        let remaining = file_size - offset;
-        let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+    while bytes_remaining > 0 {
+        let chunk_size = std::cmp::min(bytes_remaining, CHUNK_SIZE);
 
         let mut buffer = vec![0u8; chunk_size];
         file.read_exact(&mut buffer)?;
@@ -37,13 +36,13 @@ fn stream_file_to_channel(
         let bytes = Bytes::from(buffer);
         if tx.blocking_send(Ok(bytes)).is_err() {
             // Receiver dropped, stop sending
-            return Ok(false);
+            return Ok(());
         }
 
-        offset += chunk_size as u64;
+        bytes_remaining -= chunk_size;
     }
 
-    Ok(true)
+    Ok(())
 }
 
 /// Wrapper to implement BlockIo for std::fs::File.
@@ -977,6 +976,37 @@ mod tests {
             received.extend_from_slice(&bytes);
         }
 
+        assert_eq!(received.len(), test_data.len());
+        assert_eq!(received, test_data);
+    }
+
+    #[test]
+    fn test_stream_file_to_channel_multiple_chunks() {
+        // Create a file larger than CHUNK_SIZE (32MB) to test chunking
+        // 70MB = 2 full chunks (32MB each) + 1 partial chunk (6MB)
+        let dir = setup_test_dir();
+        let test_file = dir.path().join("large.bin");
+        let file_size = 70 * 1024 * 1024; // 70MB
+        let test_data: Vec<u8> = (0..file_size).map(|i| (i % 256) as u8).collect();
+        std::fs::write(&test_file, &test_data).unwrap();
+
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut file = File::open(&test_file).unwrap();
+
+        std::thread::spawn(move || {
+            stream_file_to_channel(&mut file, file_size as u64, &tx).unwrap();
+        });
+
+        // Collect chunks and verify we get multiple
+        let mut received = Vec::new();
+        let mut chunk_count = 0;
+        while let Some(result) = rx.blocking_recv() {
+            let bytes = result.unwrap();
+            chunk_count += 1;
+            received.extend_from_slice(&bytes);
+        }
+
+        assert_eq!(chunk_count, 3); // 32MB + 32MB + 6MB
         assert_eq!(received.len(), test_data.len());
         assert_eq!(received, test_data);
     }
