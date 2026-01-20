@@ -6,8 +6,6 @@
 db-path = "~/.cargo/advisory-db"
 # Update the advisory database on each run
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Check all crates for vulnerabilities
-vulnerability = "deny"
 # Warn about packages that have been yanked
 yanked = "warn"
 # Check unmaintained packages (scope: all, workspace, transitive, none)
@@ -16,8 +14,6 @@ unmaintained = "workspace"
 ignore = []
 
 [licenses]
-# Deny unlicensed packages
-unlicensed = "deny"
 # Allow these licenses
 allow = [
     "MIT",
@@ -29,8 +25,6 @@ allow = [
     "MPL-2.0",
     "Unicode-DFS-2016",
 ]
-# Copyleft licenses that require disclosure
-copyleft = "warn"
 # Default confidence threshold for license detection
 confidence-threshold = 0.8
 
