@@ -16,6 +16,36 @@ const ISO_BLOCK_SIZE: u64 = 2048;
 /// Chunk size for streaming (32MB)
 const CHUNK_SIZE: usize = 32 * 1024 * 1024;
 
+/// Stream file contents in chunks to a channel.
+///
+/// Reads the file in CHUNK_SIZE chunks and sends each chunk to the channel.
+/// Returns Ok(true) if completed successfully, Ok(false) if receiver dropped.
+fn stream_file_to_channel(
+    file: &mut File,
+    file_size: u64,
+    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+) -> Result<bool, std::io::Error> {
+    let mut offset: u64 = 0;
+
+    while offset < file_size {
+        let remaining = file_size - offset;
+        let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
+
+        let mut buffer = vec![0u8; chunk_size];
+        file.read_exact(&mut buffer)?;
+
+        let bytes = Bytes::from(buffer);
+        if tx.blocking_send(Ok(bytes)).is_err() {
+            // Receiver dropped, stop sending
+            return Ok(false);
+        }
+
+        offset += chunk_size as u64;
+    }
+
+    Ok(true)
+}
+
 /// Wrapper to implement BlockIo for std::fs::File.
 struct FileBlockIo {
     file: File,
@@ -432,24 +462,7 @@ impl IsoService {
         tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<(), std::io::Error> {
                 let mut file = File::open(&iso_path)?;
-                let mut offset: u64 = 0;
-
-                while offset < file_size {
-                    let remaining = file_size - offset;
-                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
-
-                    let mut buffer = vec![0u8; chunk_size];
-                    file.read_exact(&mut buffer)?;
-
-                    let bytes = Bytes::from(buffer);
-                    if tx.blocking_send(Ok(bytes)).is_err() {
-                        // Receiver dropped, stop sending
-                        break;
-                    }
-
-                    offset += chunk_size as u64;
-                }
-
+                stream_file_to_channel(&mut file, file_size, &tx)?;
                 Ok(())
             })();
 
@@ -662,21 +675,7 @@ impl IsoService {
 
                 // Phase 2: Stream firmware from disk
                 let mut firmware_file = File::open(&firmware_path_clone)?;
-                let mut offset: u64 = 0;
-                while offset < firmware_size {
-                    let remaining = firmware_size - offset;
-                    let chunk_size = std::cmp::min(remaining as usize, CHUNK_SIZE);
-
-                    let mut buffer = vec![0u8; chunk_size];
-                    firmware_file.read_exact(&mut buffer)?;
-
-                    let bytes = Bytes::from(buffer);
-                    if tx.blocking_send(Ok(bytes)).is_err() {
-                        return Ok(());
-                    }
-
-                    offset += chunk_size as u64;
-                }
+                stream_file_to_channel(&mut firmware_file, firmware_size, &tx)?;
 
                 Ok(())
             })();
@@ -951,5 +950,78 @@ mod tests {
         let service = IsoService::new(dir.path().to_path_buf());
         let result = service.should_concat_firmware("test", "/install/initrd.gz").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_stream_file_to_channel() {
+        // Create a test file with known content
+        let dir = setup_test_dir();
+        let test_file = dir.path().join("test.bin");
+        let test_data = vec![0xABu8; 1024 * 100]; // 100KB of 0xAB
+        std::fs::write(&test_file, &test_data).unwrap();
+
+        // Create channel and stream
+        let (tx, mut rx) = mpsc::channel(2);
+        let mut file = File::open(&test_file).unwrap();
+        let file_size = test_data.len() as u64;
+
+        // Run in a thread since blocking_send requires it
+        std::thread::spawn(move || {
+            stream_file_to_channel(&mut file, file_size, &tx).unwrap();
+        });
+
+        // Collect all chunks
+        let mut received = Vec::new();
+        while let Some(result) = rx.blocking_recv() {
+            let bytes = result.unwrap();
+            received.extend_from_slice(&bytes);
+        }
+
+        assert_eq!(received.len(), test_data.len());
+        assert_eq!(received, test_data);
+    }
+
+    #[tokio::test]
+    async fn test_stream_iso_file() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("test-iso");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+
+        // Create iso.cfg
+        std::fs::write(iso_dir.join("iso.cfg"), "filename=test.iso\n").unwrap();
+
+        // Create a test "ISO" file with known content (1MB)
+        let test_data: Vec<u8> = (0..1024 * 1024).map(|i| (i % 256) as u8).collect();
+        std::fs::write(iso_dir.join("test.iso"), &test_data).unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+        let (size, mut rx) = service.stream_iso_file("test-iso").unwrap();
+
+        assert_eq!(size, test_data.len() as u64);
+
+        // Collect all chunks
+        let mut received = Vec::new();
+        while let Some(result) = rx.recv().await {
+            let bytes = result.unwrap();
+            received.extend_from_slice(&bytes);
+        }
+
+        assert_eq!(received.len(), test_data.len());
+        assert_eq!(received, test_data);
+    }
+
+    #[tokio::test]
+    async fn test_stream_iso_file_not_found() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("test-iso");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+
+        // Create iso.cfg pointing to non-existent file
+        std::fs::write(iso_dir.join("iso.cfg"), "filename=missing.iso\n").unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+        let result = service.stream_iso_file("test-iso");
+
+        assert!(matches!(result, Err(AppError::IsoFileNotFound { .. })));
     }
 }
