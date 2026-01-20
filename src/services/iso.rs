@@ -442,7 +442,10 @@ impl IsoService {
             format!("/{}", file_path)
         };
 
-        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|_| {
+        tracing::debug!("Looking for file in ISO: {}", normalized_path);
+
+        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
+            tracing::debug!("File not found in ISO: {}", e);
             AppError::FileNotFoundInIso {
                 iso: iso_name.to_string(),
                 path: file_path.to_string(),
@@ -455,10 +458,11 @@ impl IsoService {
         // Create bounded channel for backpressure (2 chunks max in flight)
         let (tx, rx) = mpsc::channel(2);
 
-        // Clone path for the spawned task
         let iso_path_clone = iso_path.clone();
 
-        // Spawn blocking task to read chunks
+        // Spawn blocking task to read chunks.
+        // We re-open the ISO here because FileBlockIo contains a File handle
+        // which is not Send and cannot be moved into the spawned task.
         tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<(), std::io::Error> {
                 let file = File::open(&iso_path_clone)?;
@@ -538,7 +542,10 @@ impl IsoService {
             format!("/{}", initrd_path)
         };
 
-        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|_| {
+        tracing::debug!("Looking for initrd in ISO: {}", normalized_path);
+
+        let entry = find_file(&mut block_io, &volume, &normalized_path).map_err(|e| {
+            tracing::debug!("Initrd not found in ISO: {}", e);
             AppError::FileNotFoundInIso {
                 iso: iso_name.to_string(),
                 path: initrd_path.to_string(),
@@ -567,11 +574,12 @@ impl IsoService {
         // Create bounded channel for backpressure (2 chunks max in flight)
         let (tx, rx) = mpsc::channel(2);
 
-        // Clone paths for the spawned task
         let iso_path_clone = iso_path.clone();
         let firmware_path_clone = firmware_path.clone();
 
-        // Spawn blocking task to read chunks
+        // Spawn blocking task to read chunks.
+        // We re-open the ISO here because FileBlockIo contains a File handle
+        // which is not Send and cannot be moved into the spawned task.
         tokio::task::spawn_blocking(move || {
             let result = (|| -> Result<(), std::io::Error> {
                 // Phase 1: Stream initrd from ISO
