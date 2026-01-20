@@ -2,6 +2,11 @@
 //!
 //! HTTP server for PXE booting multiple OSes with multiple configurations.
 
+use tikv_jemallocator::Jemalloc;
+
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 mod config;
 mod error;
 mod routes;
