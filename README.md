@@ -202,7 +202,11 @@ filename=ubuntu-24.04-live-server-amd64.iso
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `filename` | **Yes** | Name of the ISO file in the same directory |
+| `filename` | **Yes** | Name of the archive file (.iso or .tar.gz/.tgz) |
+
+Supported archive formats:
+- `.iso` - ISO9660 images
+- `.tar.gz` / `.tgz` - Gzip-compressed tarballs (e.g., netboot archives)
 
 ---
 
