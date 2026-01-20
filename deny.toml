@@ -6,12 +6,12 @@
 db-path = "~/.cargo/advisory-db"
 # Update the advisory database on each run
 db-urls = ["https://github.com/rustsec/advisory-db"]
-# Deny packages with known vulnerabilities
+# Check all crates for vulnerabilities
 vulnerability = "deny"
 # Warn about packages that have been yanked
 yanked = "warn"
-# Warn about unmaintained packages
-unmaintained = "warn"
+# Check unmaintained packages (scope: all, workspace, transitive, none)
+unmaintained = "workspace"
 # Ignore specific advisories (add IDs here if needed)
 ignore = []
 
