@@ -11,7 +11,7 @@ use crate::utils::{normalize_mac, parse_host_header};
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use serde::Deserialize;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
@@ -24,10 +24,11 @@ pub struct IsoQuery {
 
 /// Handle GET /iso/{iso_name}/{path}
 ///
-/// Three behaviors:
-/// 1. If path matches the ISO filename -> serve the whole ISO
-/// 2. If path.j2 exists in config dir -> render template
-/// 3. Otherwise -> read from ISO via iso9660_simple
+/// Four behaviors:
+/// 1. If path matches initrd_path and firmware is configured -> serve combined initrd+firmware
+/// 2. If path matches the ISO filename -> serve the whole ISO
+/// 3. If path.j2 exists in config dir -> render template
+/// 4. Otherwise -> read from ISO via iso9660_simple
 pub async fn handle_iso(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -38,6 +39,17 @@ pub async fn handle_iso(
     let iso_service = IsoService::new(config.config_path.clone());
 
     tracing::debug!("ISO request: iso={}, path={}", iso_name, path);
+
+    // Check if this is a request for initrd that needs firmware concatenation
+    if let Some((initrd_path, firmware)) = iso_service.should_concat_firmware(&iso_name, &path)? {
+        tracing::info!(
+            "Serving initrd with firmware: {}/{} + {}",
+            iso_name,
+            initrd_path,
+            firmware
+        );
+        return serve_initrd_with_firmware(&iso_service, &iso_name, &initrd_path, &firmware);
+    }
 
     // Check if this is a request for the ISO file itself
     if iso_service.is_iso_file(&iso_name, &path)? {
@@ -155,21 +167,53 @@ async fn serve_template(
     // Render template
     let template_service = TemplateService::new();
     let rendered = template_service.render_file(template_path, &ctx)?;
+    let content_length = rendered.len();
 
     // Determine content type based on file extension
     let content_type = guess_content_type(path);
 
-    Ok((StatusCode::OK, [("content-type", content_type)], rendered).into_response())
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(Body::from(rendered))
+        .unwrap())
 }
 
 /// Serve a file from within the ISO.
 fn serve_from_iso(iso_service: &IsoService, iso_name: &str, path: &str) -> AppResult<Response> {
     let content = iso_service.read_from_iso(iso_name, path)?;
+    let content_length = content.len();
 
     // Determine content type based on file extension
     let content_type = guess_content_type(path);
 
-    Ok((StatusCode::OK, [("content-type", content_type)], content).into_response())
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(Body::from(content))
+        .unwrap())
+}
+
+/// Serve initrd with firmware concatenated.
+///
+/// Used for Debian netboot where firmware.cpio.gz needs to be appended to initrd.
+fn serve_initrd_with_firmware(
+    iso_service: &IsoService,
+    iso_name: &str,
+    initrd_path: &str,
+    firmware: &str,
+) -> AppResult<Response> {
+    let content = iso_service.read_initrd_with_firmware(iso_name, initrd_path, firmware)?;
+    let content_length = content.len();
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(Body::from(content))
+        .unwrap())
 }
 
 /// Extract automation name and MAC from path.

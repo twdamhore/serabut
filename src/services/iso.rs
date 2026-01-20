@@ -67,6 +67,10 @@ impl BlockIo for FileBlockIo {
 #[derive(Debug, Clone)]
 pub struct IsoConfig {
     pub filename: String,
+    /// Path to initrd inside the ISO (for firmware concatenation).
+    pub initrd_path: Option<String>,
+    /// Firmware file to append to initrd (e.g., firmware.cpio.gz).
+    pub firmware: Option<String>,
 }
 
 /// Service for reading ISO files and their contents.
@@ -268,6 +272,8 @@ impl IsoService {
 
         let reader = BufReader::new(file);
         let mut filename = None;
+        let mut initrd_path = None;
+        let mut firmware = None;
 
         for line in reader.lines() {
             let line = line.map_err(|e| AppError::FileRead {
@@ -276,8 +282,11 @@ impl IsoService {
             })?;
 
             if let Some((key, value)) = parse_config_line(&line) {
-                if key == "filename" {
-                    filename = Some(value.to_string());
+                match key {
+                    "filename" => filename = Some(value.to_string()),
+                    "initrd_path" => initrd_path = Some(value.to_string()),
+                    "firmware" => firmware = Some(value.to_string()),
+                    _ => {}
                 }
             }
         }
@@ -287,7 +296,11 @@ impl IsoService {
             message: "Missing required 'filename' field".to_string(),
         })?;
 
-        Ok(IsoConfig { filename })
+        Ok(IsoConfig {
+            filename,
+            initrd_path,
+            firmware,
+        })
     }
 
     /// Get the full path to the ISO file.
@@ -380,6 +393,63 @@ impl IsoService {
             path: iso_path,
             message: format!("Failed to read file from ISO: {}", e),
         })
+    }
+
+    /// Check if firmware concatenation is configured and path matches initrd_path.
+    ///
+    /// Returns Some((initrd_path, firmware)) if the requested path matches initrd_path
+    /// and firmware is configured. Returns None otherwise.
+    pub fn should_concat_firmware(&self, iso_name: &str, path: &str) -> AppResult<Option<(String, String)>> {
+        let config = self.load_config(iso_name)?;
+
+        // Normalize path for comparison (handle leading slash variations)
+        let normalized_path = path.trim_start_matches('/');
+
+        if let (Some(initrd_path), Some(firmware)) = (config.initrd_path, config.firmware) {
+            let normalized_initrd = initrd_path.trim_start_matches('/');
+            if normalized_path == normalized_initrd {
+                return Ok(Some((initrd_path, firmware)));
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Read initrd from ISO and concatenate firmware file.
+    ///
+    /// This is used for Debian netboot where firmware needs to be appended to initrd.
+    /// See: https://wiki.debian.org/DebianInstaller/NetbootFirmware
+    pub fn read_initrd_with_firmware(
+        &self,
+        iso_name: &str,
+        initrd_path: &str,
+        firmware_filename: &str,
+    ) -> AppResult<Vec<u8>> {
+        // Read initrd from ISO
+        let mut content = self.read_from_iso(iso_name, initrd_path)?;
+
+        // Read firmware file from the iso config directory
+        let firmware_path = self.iso_dir(iso_name).join(firmware_filename);
+
+        tracing::info!(
+            "Concatenating firmware {:?} to initrd {}",
+            firmware_path,
+            initrd_path
+        );
+
+        let mut firmware_file = File::open(&firmware_path).map_err(|e| AppError::FileRead {
+            path: firmware_path.clone(),
+            source: e,
+        })?;
+
+        firmware_file
+            .read_to_end(&mut content)
+            .map_err(|e| AppError::FileRead {
+                path: firmware_path,
+                source: e,
+            })?;
+
+        Ok(content)
     }
 
     /// Get the boot template path for an ISO.
@@ -558,5 +628,122 @@ mod tests {
         let result = service.boot_template_path("ubuntu-24.04", None);
 
         assert!(matches!(result, Err(AppError::TemplateNotFound { .. })));
+    }
+
+    #[test]
+    fn test_load_iso_config_with_firmware() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("debian-13");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=debian-13.3.0-amd64-netinst.iso\ninitrd_path=/install.amd/initrd.gz\nfirmware=firmware.cpio.gz\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+        let config = service.load_config("debian-13").unwrap();
+
+        assert_eq!(config.filename, "debian-13.3.0-amd64-netinst.iso");
+        assert_eq!(config.initrd_path, Some("/install.amd/initrd.gz".to_string()));
+        assert_eq!(config.firmware, Some("firmware.cpio.gz".to_string()));
+    }
+
+    #[test]
+    fn test_load_iso_config_without_firmware() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("ubuntu-24.04");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=ubuntu-24.04-live-server.iso\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+        let config = service.load_config("ubuntu-24.04").unwrap();
+
+        assert_eq!(config.filename, "ubuntu-24.04-live-server.iso");
+        assert_eq!(config.initrd_path, None);
+        assert_eq!(config.firmware, None);
+    }
+
+    #[test]
+    fn test_should_concat_firmware_matches() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("debian-13");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=debian.iso\ninitrd_path=/install.amd/initrd.gz\nfirmware=firmware.cpio.gz\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+
+        // Should match with leading slash
+        let result = service.should_concat_firmware("debian-13", "/install.amd/initrd.gz").unwrap();
+        assert!(result.is_some());
+        let (initrd, fw) = result.unwrap();
+        assert_eq!(initrd, "/install.amd/initrd.gz");
+        assert_eq!(fw, "firmware.cpio.gz");
+
+        // Should match without leading slash
+        let result = service.should_concat_firmware("debian-13", "install.amd/initrd.gz").unwrap();
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_should_concat_firmware_no_match() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("debian-13");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=debian.iso\ninitrd_path=/install.amd/initrd.gz\nfirmware=firmware.cpio.gz\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+
+        // Different path should not match
+        let result = service.should_concat_firmware("debian-13", "/install.amd/vmlinuz").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_should_concat_firmware_not_configured() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("ubuntu-24.04");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=ubuntu.iso\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+
+        // No firmware configured, should return None
+        let result = service.should_concat_firmware("ubuntu-24.04", "/casper/initrd").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_should_concat_firmware_partial_config() {
+        let dir = setup_test_dir();
+        let iso_dir = dir.path().join("iso").join("test");
+        std::fs::create_dir_all(&iso_dir).unwrap();
+
+        // Only initrd_path, no firmware
+        std::fs::write(
+            iso_dir.join("iso.cfg"),
+            "filename=test.iso\ninitrd_path=/install/initrd.gz\n",
+        )
+        .unwrap();
+
+        let service = IsoService::new(dir.path().to_path_buf());
+        let result = service.should_concat_firmware("test", "/install/initrd.gz").unwrap();
+        assert!(result.is_none());
     }
 }
