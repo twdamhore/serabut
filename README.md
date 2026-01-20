@@ -18,7 +18,8 @@ I wanted:
 - ✅ I do not need a computer with BMC. My mini PC works. One PXE boot then `serabut` will take it from there and the next boot is from a clean installation. No physical button to press.
 - ✅ I do not tight coupling with the current OS/distro/release. The running `ldd` on the one binary, I can see 4 libraries: `linux-vdso`/`libgcc_s`/`libm`/`libc`.
 - ✅ Tested on Ubuntu 22.04/24.04/25.10.
-- ❓ To be tested on Debian and AlmaLinux and Rocky Linux.
+- ✅ Supports Debian netboot with automatic firmware injection (initrd + firmware.cpio.gz concatenation).
+- ❓ To be tested on AlmaLinux and Rocky Linux.
 
 ## Leverage
 I settle for using `dnsmasq` for for Proxy DHCP and the initial TFTP transfer. All other file transfer was on http and `serabut` would serve the content. There was no need to leverage on `nginx`. I would configure the MAC address and what to install on a file, and then when it is done, the final step of the installation process would call the URL endpoint that would remove the entry. The next boot would not re-start the installation process again.
@@ -200,9 +201,20 @@ Location: `/var/lib/serabutd/iso/{iso-name}/iso.cfg`
 filename=ubuntu-24.04-live-server-amd64.iso
 ```
 
+**Debian with firmware injection:**
+```ini
+filename=debian-13.3.0-amd64-netinst.iso
+initrd_path=/install.amd/initrd.gz
+firmware=firmware.cpio.gz
+```
+
 | Key | Required | Description |
 |-----|----------|-------------|
 | `filename` | **Yes** | Name of the ISO file in the same directory |
+| `initrd_path` | No | Path to initrd inside ISO (for firmware concatenation) |
+| `firmware` | No | Firmware file to append to initrd (e.g., `firmware.cpio.gz`) |
+
+When both `initrd_path` and `firmware` are set, requests for the initrd path will automatically serve the initrd with firmware appended. This is required for Debian netboot installations that need non-free firmware. See [Debian NetbootFirmware wiki](https://wiki.debian.org/DebianInstaller/NetbootFirmware).
 
 ---
 
@@ -238,6 +250,17 @@ initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/images/pxeboot/initrd.img
 imgfetch http://{{ host }}:{{ port }}/done/{{ mac }} ||
 boot
 ```
+
+**Debian example (with firmware):**
+```ipxe
+#!ipxe
+kernel http://{{ host }}:{{ port }}/iso/{{ iso }}/install.amd/vmlinuz auto=true priority=critical url=http://{{ host }}:{{ port }}/iso/{{ iso }}/automation/{{ automation }}/{{ mac }}/preseed.cfg
+initrd http://{{ host }}:{{ port }}/iso/{{ iso }}/install.amd/initrd.gz
+imgfetch http://{{ host }}:{{ port }}/done/{{ mac }} ||
+boot
+```
+
+Note: When `initrd_path` and `firmware` are configured in `iso.cfg`, the initrd request automatically includes the firmware ([why?](https://wiki.debian.org/DebianInstaller/NetbootFirmware)). No special URL needed.
 
 ---
 
@@ -284,6 +307,26 @@ reboot
 %packages
 @^minimal-environment
 %end
+```
+
+**Debian - preseed.cfg.j2:**
+```
+d-i debian-installer/locale string en_US.UTF-8
+d-i keyboard-configuration/xkb-keymap select us
+d-i netcfg/choose_interface select auto
+d-i netcfg/get_hostname string {{ hostname }}
+d-i mirror/country string manual
+d-i mirror/http/hostname string deb.debian.org
+d-i mirror/http/directory string /debian
+d-i passwd/root-password-crypted password $6$rounds=4096$...
+d-i clock-setup/utc boolean true
+d-i time/zone string UTC
+d-i partman-auto/method string lvm
+d-i partman-auto/choose_recipe select atomic
+d-i partman/confirm boolean true
+d-i partman/confirm_nooverwrite boolean true
+tasksel tasksel/first multiselect standard, ssh-server
+d-i finish-install/reboot_in_progress note
 ```
 
 ---
