@@ -162,9 +162,9 @@ async fn serve_template(
     Ok((StatusCode::OK, [("content-type", content_type)], rendered).into_response())
 }
 
-/// Serve a file from within the ISO.
+/// Serve a file from within the archive (ISO or tar.gz).
 fn serve_from_iso(iso_service: &IsoService, iso_name: &str, path: &str) -> AppResult<Response> {
-    let content = iso_service.read_from_iso(iso_name, path)?;
+    let content = iso_service.read_from_archive(iso_name, path)?;
 
     // Determine content type based on file extension
     let content_type = guess_content_type(path);

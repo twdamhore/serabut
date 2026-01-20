@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Add tar.gz/tgz archive support for serving files (e.g., netboot archives)
+
 ## [0.2.0] - 2026-01-19
 
 ### Added
