@@ -18,6 +18,7 @@ I wanted:
 - ✅ I do not need a computer with BMC. My mini PC works. One PXE boot then `serabut` will take it from there and the next boot is from a clean installation. No physical button to press.
 - ✅ I do not tight coupling with the current OS/distro/release. The running `ldd` on the one binary, I can see 4 libraries: `linux-vdso`/`libgcc_s`/`libm`/`libc`.
 - ✅ Tested on Ubuntu 22.04/24.04/25.10.
+- ✅ Tested on Debian 12 (Bookworm) and Debian 13 (Trixie).
 - ✅ Supports Debian netboot with automatic firmware injection (initrd + firmware.cpio.gz concatenation).
 - ❓ To be tested on AlmaLinux and Rocky Linux.
 
