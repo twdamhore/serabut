@@ -1,16 +1,14 @@
 //! ISO service for managing ISO files and reading their contents.
 //!
-//! Handles iso.cfg parsing, ISO9660 reading, tar.gz extraction, and template detection.
+//! Handles iso.cfg parsing, ISO9660 reading, and template detection.
 
 use crate::error::{AppError, AppResult};
-use flate2::read::GzDecoder;
 use gpt_disk_io::BlockIo;
 use gpt_disk_types::{BlockSize, Lba};
 use iso9660::{find_file, mount, read_file_vec};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
-use tar::Archive;
 
 const ISO_BLOCK_SIZE: u64 = 2048;
 
@@ -342,21 +340,8 @@ impl IsoService {
         None
     }
 
-    /// Read a file from within an archive (ISO or tar.gz).
-    ///
-    /// Automatically detects the archive type based on filename extension.
-    pub fn read_from_archive(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
-        let config = self.load_config(iso_name)?;
-
-        if is_tarball(&config.filename) {
-            self.read_from_tarball(iso_name, file_path)
-        } else {
-            self.read_from_iso(iso_name, file_path)
-        }
-    }
-
     /// Read a file from within an ISO.
-    fn read_from_iso(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
+    pub fn read_from_iso(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
         let iso_path = self.iso_file_path(iso_name)?;
 
         let file = File::open(&iso_path).map_err(|e| AppError::FileRead {
@@ -394,58 +379,6 @@ impl IsoService {
         read_file_vec(&mut block_io, &entry).map_err(|e| AppError::IsoRead {
             path: iso_path,
             message: format!("Failed to read file from ISO: {}", e),
-        })
-    }
-
-    /// Read a file from within a tar.gz archive.
-    fn read_from_tarball(&self, iso_name: &str, file_path: &str) -> AppResult<Vec<u8>> {
-        let tarball_path = self.iso_file_path(iso_name)?;
-
-        let file = File::open(&tarball_path).map_err(|e| AppError::FileRead {
-            path: tarball_path.clone(),
-            source: e,
-        })?;
-
-        let decoder = GzDecoder::new(file);
-        let mut archive = Archive::new(decoder);
-
-        // Normalize path - remove leading slash for tar matching
-        let normalized_path = file_path.trim_start_matches('/');
-
-        tracing::debug!("Looking for file in tarball: {}", normalized_path);
-
-        let entries = archive.entries().map_err(|e| AppError::IsoRead {
-            path: tarball_path.clone(),
-            message: format!("Failed to read tarball entries: {}", e),
-        })?;
-
-        for entry in entries {
-            let mut entry = entry.map_err(|e| AppError::IsoRead {
-                path: tarball_path.clone(),
-                message: format!("Failed to read tarball entry: {}", e),
-            })?;
-
-            let entry_path = entry.path().map_err(|e| AppError::IsoRead {
-                path: tarball_path.clone(),
-                message: format!("Failed to get entry path: {}", e),
-            })?;
-
-            let entry_path_str = entry_path.to_string_lossy();
-            let entry_normalized = entry_path_str.trim_start_matches("./");
-
-            if entry_normalized == normalized_path {
-                let mut content = Vec::new();
-                entry.read_to_end(&mut content).map_err(|e| AppError::IsoRead {
-                    path: tarball_path.clone(),
-                    message: format!("Failed to read file from tarball: {}", e),
-                })?;
-                return Ok(content);
-            }
-        }
-
-        Err(AppError::FileNotFoundInIso {
-            iso: iso_name.to_string(),
-            path: file_path.to_string(),
         })
     }
 
@@ -491,11 +424,6 @@ fn parse_config_line(line: &str) -> Option<(&str, &str)> {
 
     let (key, value) = line.split_once('=')?;
     Some((key.trim(), value.trim()))
-}
-
-/// Check if a filename is a tarball (tar.gz or tgz).
-fn is_tarball(filename: &str) -> bool {
-    filename.ends_with(".tar.gz") || filename.ends_with(".tgz")
 }
 
 #[cfg(test)]
@@ -630,124 +558,5 @@ mod tests {
         let result = service.boot_template_path("ubuntu-24.04", None);
 
         assert!(matches!(result, Err(AppError::TemplateNotFound { .. })));
-    }
-
-    #[test]
-    fn test_is_tarball() {
-        assert!(is_tarball("netboot.tar.gz"));
-        assert!(is_tarball("ubuntu.tgz"));
-        assert!(!is_tarball("ubuntu.iso"));
-        assert!(!is_tarball("archive.tar"));
-        assert!(!is_tarball("file.gz"));
-    }
-
-    #[test]
-    fn test_read_from_tarball() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use tar::Builder;
-
-        let dir = setup_test_dir();
-        let iso_dir = dir.path().join("iso").join("netboot");
-        std::fs::create_dir_all(&iso_dir).unwrap();
-
-        // Create iso.cfg pointing to tar.gz
-        std::fs::write(iso_dir.join("iso.cfg"), "filename=netboot.tar.gz\n").unwrap();
-
-        // Create a tar.gz file with test content
-        let tarball_path = iso_dir.join("netboot.tar.gz");
-        let file = File::create(&tarball_path).unwrap();
-        let encoder = GzEncoder::new(file, Compression::default());
-        let mut builder = Builder::new(encoder);
-
-        // Add a file to the tarball
-        let vmlinuz_content = b"vmlinuz binary content";
-        let mut header = tar::Header::new_gnu();
-        header.set_path("casper/vmlinuz").unwrap();
-        header.set_size(vmlinuz_content.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder.append(&header, &vmlinuz_content[..]).unwrap();
-
-        // Add another file
-        let initrd_content = b"initrd binary content";
-        let mut header = tar::Header::new_gnu();
-        header.set_path("casper/initrd").unwrap();
-        header.set_size(initrd_content.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder.append(&header, &initrd_content[..]).unwrap();
-
-        builder.into_inner().unwrap().finish().unwrap();
-
-        // Test reading from tarball
-        let service = IsoService::new(dir.path().to_path_buf());
-
-        let content = service.read_from_archive("netboot", "casper/vmlinuz").unwrap();
-        assert_eq!(content, vmlinuz_content);
-
-        let content = service.read_from_archive("netboot", "casper/initrd").unwrap();
-        assert_eq!(content, initrd_content);
-    }
-
-    #[test]
-    fn test_read_from_tarball_with_leading_slash() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use tar::Builder;
-
-        let dir = setup_test_dir();
-        let iso_dir = dir.path().join("iso").join("netboot");
-        std::fs::create_dir_all(&iso_dir).unwrap();
-
-        std::fs::write(iso_dir.join("iso.cfg"), "filename=netboot.tar.gz\n").unwrap();
-
-        let tarball_path = iso_dir.join("netboot.tar.gz");
-        let file = File::create(&tarball_path).unwrap();
-        let encoder = GzEncoder::new(file, Compression::default());
-        let mut builder = Builder::new(encoder);
-
-        let content = b"test content";
-        let mut header = tar::Header::new_gnu();
-        header.set_path("boot/vmlinuz").unwrap();
-        header.set_size(content.len() as u64);
-        header.set_mode(0o644);
-        header.set_cksum();
-        builder.append(&header, &content[..]).unwrap();
-        builder.into_inner().unwrap().finish().unwrap();
-
-        let service = IsoService::new(dir.path().to_path_buf());
-
-        // Should work with or without leading slash
-        let result = service.read_from_archive("netboot", "/boot/vmlinuz").unwrap();
-        assert_eq!(result, content);
-
-        let result = service.read_from_archive("netboot", "boot/vmlinuz").unwrap();
-        assert_eq!(result, content);
-    }
-
-    #[test]
-    fn test_read_from_tarball_file_not_found() {
-        use flate2::write::GzEncoder;
-        use flate2::Compression;
-        use tar::Builder;
-
-        let dir = setup_test_dir();
-        let iso_dir = dir.path().join("iso").join("netboot");
-        std::fs::create_dir_all(&iso_dir).unwrap();
-
-        std::fs::write(iso_dir.join("iso.cfg"), "filename=netboot.tar.gz\n").unwrap();
-
-        // Create empty tarball
-        let tarball_path = iso_dir.join("netboot.tar.gz");
-        let file = File::create(&tarball_path).unwrap();
-        let encoder = GzEncoder::new(file, Compression::default());
-        let builder = Builder::new(encoder);
-        builder.into_inner().unwrap().finish().unwrap();
-
-        let service = IsoService::new(dir.path().to_path_buf());
-
-        let result = service.read_from_archive("netboot", "nonexistent");
-        assert!(matches!(result, Err(AppError::FileNotFoundInIso { .. })));
     }
 }
