@@ -1,6 +1,6 @@
 [package]
 name = "serabutd"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "PXE boot server for multiple OSes with multiple configurations"
 license = "MIT"
