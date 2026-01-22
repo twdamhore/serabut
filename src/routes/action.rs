@@ -60,7 +60,13 @@ pub async fn get_boot(
         .join(&release)
         .join("boot.ipxe.j2");
 
-    if !template_path.exists() {
+    // Check existence using spawn_blocking for async safety
+    let path_for_check = template_path.clone();
+    let exists = task::spawn_blocking(move || path_for_check.exists())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if !exists {
         return Err(AppError::NotFound(format!(
             "Boot template not found: {}/{}/{}/boot.ipxe.j2",
             os, distro, release

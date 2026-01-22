@@ -26,7 +26,13 @@ pub async fn get_view(
 ) -> Result<Response, AppError> {
     let template_path = state.config.views_dir().join(&path);
 
-    if !template_path.exists() {
+    // Check existence using spawn_blocking for async safety
+    let path_for_check = template_path.clone();
+    let exists = task::spawn_blocking(move || path_for_check.exists())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if !exists {
         return Err(AppError::NotFound(format!("Template not found: {}", path)));
     }
 

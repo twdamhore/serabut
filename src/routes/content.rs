@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
+use tokio::task;
 
 use crate::config::AppState;
 use crate::error::AppError;
@@ -22,7 +23,13 @@ pub async fn get_iso_content(
 
     let iso_path = state.config.iso_dir().join(filename);
 
-    if !iso_path.exists() {
+    // Check existence using spawn_blocking for async safety
+    let path_for_check = iso_path.clone();
+    let exists = task::spawn_blocking(move || path_for_check.exists())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if !exists {
         return Err(AppError::NotFound(format!("ISO file not found: {}", filename)));
     }
 
@@ -88,7 +95,13 @@ pub async fn get_raw_content(
 
     let iso_path = state.config.iso_dir().join(&filename);
 
-    if !iso_path.exists() {
+    // Check existence using spawn_blocking for async safety
+    let path_for_check = iso_path.clone();
+    let exists = task::spawn_blocking(move || path_for_check.exists())
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if !exists {
         return Err(AppError::NotFound(format!("ISO file not found: {}", filename)));
     }
 
