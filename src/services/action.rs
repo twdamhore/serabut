@@ -37,7 +37,10 @@ impl ActionConfig {
             if let Some((hostname, rest)) = line.split_once('=') {
                 let hostname = hostname.trim().to_string();
                 let parts: Vec<&str> = rest.split(',').collect();
-                let release = parts[0].trim().to_string();
+                let release = match parts.first() {
+                    Some(r) if !r.trim().is_empty() => r.trim().to_string(),
+                    _ => continue, // Skip malformed lines with empty release
+                };
                 let automation = parts.get(1).map(|s| s.trim()).unwrap_or("default").to_string();
 
                 entries.insert(

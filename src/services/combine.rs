@@ -77,26 +77,19 @@ impl CombineConfig {
     }
 }
 
-/// Calculate total size of combined sources
-pub fn calculate_combined_size(
-    entry: &CombineEntry,
-    iso_dir: &Path,
-    aliases: &crate::services::aliases::AliasesConfig,
+/// Calculate total size of combined sources (sync version for use in spawn_blocking)
+fn calculate_combined_size_sync(
+    sources: &[(CombineSource, std::path::PathBuf)],
 ) -> Result<u64, AppError> {
     let mut total = 0u64;
 
-    for source in &entry.sources {
+    for (source, resolved_path) in sources {
         match source {
-            CombineSource::Content { release, path } => {
-                let filename = aliases
-                    .get_filename(release)
-                    .ok_or_else(|| AppError::NotFound(format!("Unknown release: {}", release)))?;
-                let iso_path = iso_dir.join(filename);
-                total += iso::get_file_size(&iso_path, path)?;
+            CombineSource::Content { path, .. } => {
+                total += iso::get_file_size(resolved_path, path)?;
             }
-            CombineSource::File { path } => {
-                let file_path = iso_dir.join(path);
-                let metadata = std::fs::metadata(&file_path)?;
+            CombineSource::File { .. } => {
+                let metadata = std::fs::metadata(resolved_path)?;
                 total += metadata.len();
             }
         }
@@ -105,14 +98,12 @@ pub fn calculate_combined_size(
     Ok(total)
 }
 
-/// Stream combined sources sequentially
-pub fn stream_combined(
+/// Stream combined sources sequentially (async version)
+pub async fn stream_combined(
     entry: &CombineEntry,
     iso_dir: &Path,
     aliases: &crate::services::aliases::AliasesConfig,
 ) -> Result<(u64, Body), AppError> {
-    let size = calculate_combined_size(entry, iso_dir, aliases)?;
-
     // Pre-resolve all paths to owned data
     let resolved_sources: Vec<(CombineSource, std::path::PathBuf)> = entry
         .sources
@@ -131,6 +122,14 @@ pub fn stream_combined(
             }
         })
         .collect::<Result<Vec<_>, AppError>>()?;
+
+    // Calculate size using spawn_blocking for sync I/O
+    let sources_for_size = resolved_sources.clone();
+    let size = task::spawn_blocking(move || {
+        calculate_combined_size_sync(&sources_for_size)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
 
     let stream = stream::iter(resolved_sources)
         .then(move |(source, resolved_path)| async move {

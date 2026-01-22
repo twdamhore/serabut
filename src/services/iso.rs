@@ -237,17 +237,32 @@ pub fn get_file_size(iso_path: &Path, file_path: &str) -> Result<u64, AppError> 
     Ok(entry.size as u64)
 }
 
-/// Stream file from ISO in 1MB chunks
+/// Stream file from ISO in 1MB chunks (async version)
 /// Uses smart allocation: up to 2MB initially, then 1MB or remaining size
-pub fn stream_file(iso_path: &Path, file_path: &str) -> Result<(u64, Body), AppError> {
-    let location = find_file_location(iso_path, file_path)?;
+pub async fn stream_file(iso_path: &Path, file_path: &str) -> Result<(u64, Body), AppError> {
+    let iso_path_owned = iso_path.to_path_buf();
+    let file_path_owned = file_path.to_string();
+
+    // Find file location using spawn_blocking for sync I/O
+    let location = task::spawn_blocking(move || {
+        find_file_location(&iso_path_owned, &file_path_owned)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
+
     let size = location.size;
 
-    // For small files (<=2MB), read entirely - more efficient
+    // For small files (<=2MB), read entirely using spawn_blocking
     if size <= 2 * CHUNK_SIZE as u64 {
-        let file = File::open(iso_path)?;
-        let mut iso = Iso9660Reader::new(file)?;
-        let data = iso.read_file_chunk(location.lba, 0, size as usize)?;
+        let iso_path = location.iso_path.clone();
+        let lba = location.lba;
+        let data = task::spawn_blocking(move || {
+            let file = File::open(iso_path.as_ref())?;
+            let mut iso = Iso9660Reader::new(file)?;
+            iso.read_file_chunk(lba, 0, size as usize)
+        })
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
         return Ok((size, Body::from(data)));
     }
 

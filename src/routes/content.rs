@@ -26,7 +26,7 @@ pub async fn get_iso_content(
         return Err(AppError::NotFound(format!("ISO file not found: {}", filename)));
     }
 
-    let (size, body) = iso::stream_file(&iso_path, &path)?;
+    let (size, body) = iso::stream_file(&iso_path, &path).await?;
 
     let content_type = guess_content_type(&path);
 
@@ -49,7 +49,7 @@ pub async fn get_combined_content(
         .get(&name)
         .ok_or_else(|| AppError::NotFound(format!("Unknown combine entry: {}", name)))?;
 
-    let (size, body) = combine::stream_combined(entry, &state.config.iso_dir(), &state.aliases)?;
+    let (size, body) = combine::stream_combined(entry, &state.config.iso_dir(), &state.aliases).await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
