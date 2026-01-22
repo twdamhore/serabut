@@ -1,12 +1,17 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use axum::body::Body;
+use bytes::Bytes;
+use futures::stream::{self, StreamExt};
+use tokio::task;
 
 use crate::error::AppError;
 
 const SECTOR_SIZE: usize = 2048;
+const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
 
 /// A directory entry from ISO9660
 #[derive(Debug, Clone)]
@@ -51,23 +56,34 @@ impl Iso9660Reader {
     /// Read directory entries at given LBA
     pub fn read_directory(&mut self, lba: u32, dir_size: u32) -> Result<Vec<IsoEntry>, AppError> {
         let mut entries = Vec::new();
-        let mut buffer = vec![0u8; dir_size as usize];
+        let dir_size = dir_size as usize;
+        let mut buffer = vec![0u8; dir_size];
 
         self.file.seek(SeekFrom::Start(lba as u64 * SECTOR_SIZE as u64))?;
         self.file.read_exact(&mut buffer)?;
 
         let mut offset = 0usize;
-        while offset < dir_size as usize {
+        while offset < dir_size {
+            // Bounds check for record length byte
+            if offset >= buffer.len() {
+                break;
+            }
+
             let record_len = buffer[offset] as usize;
 
             // Zero length means padding to sector boundary - skip to next sector
             if record_len == 0 {
                 let next_sector = ((offset / SECTOR_SIZE) + 1) * SECTOR_SIZE;
-                if next_sector >= dir_size as usize {
+                if next_sector >= dir_size {
                     break;
                 }
                 offset = next_sector;
                 continue;
+            }
+
+            // Bounds check: ensure we have enough data for the minimum record
+            if offset + 33 > buffer.len() {
+                break;
             }
 
             // Parse directory record
@@ -88,7 +104,15 @@ impl Iso9660Reader {
             ]);
 
             let name_len = buffer[offset + 32] as usize;
-            let name_bytes = &buffer[offset + 33..offset + 33 + name_len];
+
+            // Bounds check for name
+            let name_start = offset + 33;
+            let name_end = name_start + name_len;
+            if name_end > buffer.len() {
+                break;
+            }
+
+            let name_bytes = &buffer[name_start..name_end];
 
             // Parse name
             let name = if name_len == 1 && name_bytes[0] == 0 {
@@ -121,13 +145,47 @@ impl Iso9660Reader {
         self.read_directory(self.root_lba, self.root_size)
     }
 
-    /// Read file contents at given LBA and size
+    /// Read a chunk of file data at given offset
+    pub fn read_file_chunk(&mut self, lba: u32, file_offset: u64, chunk_size: usize) -> Result<Vec<u8>, AppError> {
+        let byte_offset = lba as u64 * SECTOR_SIZE as u64 + file_offset;
+        let mut data = vec![0u8; chunk_size];
+        self.file.seek(SeekFrom::Start(byte_offset))?;
+        self.file.read_exact(&mut data)?;
+        Ok(data)
+    }
+
+    /// Read entire file contents at given LBA and size (for small files)
     pub fn read_file_data(&mut self, lba: u32, size: u32) -> Result<Vec<u8>, AppError> {
         let mut data = vec![0u8; size as usize];
         self.file.seek(SeekFrom::Start(lba as u64 * SECTOR_SIZE as u64))?;
         self.file.read_exact(&mut data)?;
         Ok(data)
     }
+}
+
+/// File location info for streaming
+#[derive(Clone)]
+pub struct IsoFileLocation {
+    pub iso_path: Arc<Path>,
+    pub lba: u32,
+    pub size: u64,
+}
+
+/// Find a file by path in the ISO and return its location
+pub fn find_file_location(iso_path: &Path, file_path: &str) -> Result<IsoFileLocation, AppError> {
+    let file = File::open(iso_path)?;
+    let mut iso = Iso9660Reader::new(file)?;
+    let entry = find_file_entry(&mut iso, file_path)?;
+
+    if entry.is_dir {
+        return Err(AppError::BadRequest(format!("'{}' is a directory", file_path)));
+    }
+
+    Ok(IsoFileLocation {
+        iso_path: Arc::from(iso_path),
+        lba: entry.lba,
+        size: entry.size as u64,
+    })
 }
 
 /// Find a file by path in the ISO
@@ -179,21 +237,56 @@ pub fn get_file_size(iso_path: &Path, file_path: &str) -> Result<u64, AppError> 
     Ok(entry.size as u64)
 }
 
-/// Stream file from ISO
+/// Stream file from ISO in 1MB chunks
+/// Uses smart allocation: up to 2MB initially, then 1MB or remaining size
 pub fn stream_file(iso_path: &Path, file_path: &str) -> Result<(u64, Body), AppError> {
-    let file = File::open(iso_path)?;
-    let mut iso = Iso9660Reader::new(file)?;
-    let entry = find_file_entry(&mut iso, file_path)?;
+    let location = find_file_location(iso_path, file_path)?;
+    let size = location.size;
 
-    if entry.is_dir {
-        return Err(AppError::BadRequest(format!("'{}' is a directory", file_path)));
+    // For small files (<=2MB), read entirely - more efficient
+    if size <= 2 * CHUNK_SIZE as u64 {
+        let file = File::open(iso_path)?;
+        let mut iso = Iso9660Reader::new(file)?;
+        let data = iso.read_file_chunk(location.lba, 0, size as usize)?;
+        return Ok((size, Body::from(data)));
     }
 
-    let data = iso.read_file_data(entry.lba, entry.size)?;
-    Ok((entry.size as u64, Body::from(data)))
+    // For larger files, stream in 1MB chunks
+    let iso_path = location.iso_path.clone();
+    let lba = location.lba;
+
+    // Generate chunk offsets
+    let mut offsets = Vec::new();
+    let mut offset = 0u64;
+    while offset < size {
+        let chunk_size = std::cmp::min(CHUNK_SIZE as u64, size - offset);
+        offsets.push((offset, chunk_size as usize));
+        offset += chunk_size as u64;
+    }
+
+    let stream = stream::iter(offsets.into_iter().map(move |(offset, chunk_size)| {
+        let iso_path = iso_path.clone();
+        async move {
+            // Use spawn_blocking for synchronous file I/O
+            let result = task::spawn_blocking(move || {
+                let file = File::open(iso_path.as_ref())?;
+                let mut iso = Iso9660Reader::new(file)?;
+                iso.read_file_chunk(lba, offset, chunk_size)
+            })
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+            result.map(Bytes::from).map_err(|e: AppError| {
+                std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+            })
+        }
+    }))
+    .buffered(2); // Buffer up to 2 chunks for better throughput
+
+    Ok((size, Body::from_stream(stream)))
 }
 
-/// Read entire file from ISO into memory
+/// Read entire file from ISO into memory (for small files like templates)
 pub fn read_file(iso_path: &Path, file_path: &str) -> Result<Vec<u8>, AppError> {
     let file = File::open(iso_path)?;
     let mut iso = Iso9660Reader::new(file)?;

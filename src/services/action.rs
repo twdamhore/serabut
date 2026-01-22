@@ -97,7 +97,16 @@ impl ActionConfig {
             )));
         }
 
-        std::fs::write(&self.path, new_lines.join("\n") + "\n")?;
+        let new_content = new_lines.join("\n") + "\n";
+        std::fs::write(&self.path, &new_content)?;
+
+        // Validate the write by reading back
+        let written = std::fs::read_to_string(&self.path)?;
+        if written != new_content {
+            return Err(AppError::Internal(
+                "Write validation failed: file content mismatch".to_string(),
+            ));
+        }
 
         // Remove from in-memory entries
         self.entries.remove(hostname);

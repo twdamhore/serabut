@@ -3,6 +3,7 @@ use std::path::Path;
 
 use axum::body::Body;
 use futures::stream::{self, StreamExt};
+use tokio::task;
 
 use crate::error::AppError;
 use crate::services::iso;
@@ -135,18 +136,18 @@ pub fn stream_combined(
         .then(move |(source, resolved_path)| async move {
             match source {
                 CombineSource::Content { path, .. } => {
-                    // Read ISO content
-                    match iso::read_file(&resolved_path, &path) {
-                        Ok(data) => Ok(data),
-                        Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
-                    }
+                    // Read ISO content using spawn_blocking for sync I/O
+                    let result = task::spawn_blocking(move || {
+                        iso::read_file(&resolved_path, &path)
+                    })
+                    .await
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+
+                    result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
                 }
                 CombineSource::File { .. } => {
                     // Read filesystem file
-                    match tokio::fs::read(&resolved_path).await {
-                        Ok(data) => Ok(data),
-                        Err(e) => Err(e),
-                    }
+                    tokio::fs::read(&resolved_path).await
                 }
             }
         })

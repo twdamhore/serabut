@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use axum::routing::get;
 use axum::Router;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 use crate::config::AppState;
 
@@ -20,5 +22,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Action routes
         .route("/action/boot/{mac}", get(action::get_boot))
         .route("/action/done/{mac}", get(action::mark_done))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state)
 }
