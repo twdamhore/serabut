@@ -33,7 +33,10 @@ impl AliasesConfig {
             if let Some((release, rest)) = line.split_once('=') {
                 let release = release.trim().to_string();
                 let parts: Vec<&str> = rest.split(',').collect();
-                let filename = parts[0].trim().to_string();
+                let filename = match parts.first() {
+                    Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+                    _ => continue, // Skip malformed lines with empty filename
+                };
                 let downloadable = parts.get(1).map(|s| s.trim() == "downloadable").unwrap_or(false);
 
                 entries.insert(
