@@ -1,121 +1,44 @@
-//! Error types for the serabutd application.
-
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use std::path::PathBuf;
 use thiserror::Error;
 
-/// Application error type.
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("MAC address not found in action.cfg: {mac}")]
-    MacNotFound { mac: String },
+    #[error("Config error: {0}")]
+    Config(String),
 
-    #[error("Hardware config not found for MAC {mac}: {path}")]
-    HardwareConfigNotFound { mac: String, path: PathBuf },
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
-    #[error("ISO config not found: {path}")]
-    IsoConfigNotFound { path: PathBuf },
+    #[error("ISO error: {0}")]
+    Iso(String),
 
-    #[error("ISO file not found: {path}")]
-    IsoFileNotFound { path: PathBuf },
+    #[error("Template error: {0}")]
+    Template(#[from] minijinja::Error),
 
-    #[error("File not found in ISO {iso}: {path}")]
-    FileNotFoundInIso { iso: String, path: String },
+    #[error("Not found: {0}")]
+    NotFound(String),
 
-    #[error("Template not found: {path}")]
-    TemplateNotFound { path: PathBuf },
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 
-    #[error("Template rendering failed for {template}: {source}")]
-    TemplateRender {
-        template: String,
-        #[source]
-        source: minijinja::Error,
-    },
-
-    #[error("Failed to parse config file {path}: {message}")]
-    ConfigParse { path: PathBuf, message: String },
-
-    #[error("Failed to read file {path}: {source}")]
-    FileRead {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("Failed to write file {path}: {source}")]
-    FileWrite {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("Failed to read ISO {path}: {message}")]
-    IsoRead { path: PathBuf, message: String },
-
-    #[error("Invalid MAC address format: {mac}")]
-    InvalidMac { mac: String },
+    #[error("Bad request: {0}")]
+    BadRequest(String),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = match &self {
-            AppError::MacNotFound { .. } => StatusCode::NOT_FOUND,
-            AppError::FileNotFoundInIso { .. } => StatusCode::NOT_FOUND,
-            AppError::IsoFileNotFound { .. } => StatusCode::NOT_FOUND,
-            AppError::HardwareConfigNotFound { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::IsoConfigNotFound { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::TemplateNotFound { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::TemplateRender { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::ConfigParse { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::FileRead { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::FileWrite { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::IsoRead { .. } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::InvalidMac { .. } => StatusCode::BAD_REQUEST,
+        let (status, message) = match &self {
+            AppError::Config(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            AppError::Io(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            AppError::Iso(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
+            AppError::Template(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
+            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
         };
 
-        // Log 404s as info (expected behavior), actual errors as error
-        match status {
-            StatusCode::NOT_FOUND => tracing::info!("{}", self),
-            StatusCode::BAD_REQUEST => tracing::warn!("{}", self),
-            _ => tracing::error!("{}", self),
-        }
-        (status, self.to_string()).into_response()
-    }
-}
-
-/// Result type alias for the application.
-pub type AppResult<T> = Result<T, AppError>;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_mac_not_found_is_404() {
-        let err = AppError::MacNotFound {
-            mac: "aa-bb-cc-dd-ee-ff".to_string(),
-        };
-        let response = err.into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn test_hardware_config_not_found_is_500() {
-        let err = AppError::HardwareConfigNotFound {
-            mac: "aa-bb-cc-dd-ee-ff".to_string(),
-            path: PathBuf::from("/var/lib/serabutd/hardware/aa-bb-cc-dd-ee-ff"),
-        };
-        let response = err.into_response();
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    #[test]
-    fn test_invalid_mac_is_400() {
-        let err = AppError::InvalidMac {
-            mac: "invalid".to_string(),
-        };
-        let response = err.into_response();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        tracing::error!("{}: {}", status, message);
+        (status, message).into_response()
     }
 }

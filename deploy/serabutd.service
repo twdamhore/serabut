@@ -1,24 +1,39 @@
 [Unit]
-Description=Serabut PXE Boot Server
+Description=Serabut PXE Boot Manager
 Documentation=https://github.com/twdamhore/serabut
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=serabut
-Group=serabut
 ExecStart=/usr/local/bin/serabutd
-ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
+
+# Environment
+Environment=RUST_LOG=serabutd=info
 
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/serabutd
 PrivateTmp=yes
-LogsDirectory=serabut
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# Allow read access to data directory
+ReadWritePaths=/var/lib/serabutd
+
+# Allow binding to port 8080 (no special privileges needed for ports > 1024)
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

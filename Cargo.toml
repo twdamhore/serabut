@@ -1,8 +1,9 @@
 [package]
 name = "serabutd"
-version = "0.3.0"
-edition = "2021"
-description = "PXE boot server for multiple OSes with multiple configurations"
+version = "2.0.0"
+edition = "2024"
+description = "PXE Boot Manager - serves boot scripts and files from ISO images"
+authors = ["TWD Amhore"]
 license = "MIT"
 
 [dependencies]
@@ -10,20 +11,18 @@ tikv-jemallocator = "0.6"
 axum = "0.8"
 tokio = { version = "1", features = ["full", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
-tokio-stream = "0.1"
+minijinja = "2"
+futures = "0.3"
 bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
-minijinja = "2"
-base64 = "0.22"
 thiserror = "2"
-chrono = "0.4"
-fs2 = "0.4"
 serde = { version = "1", features = ["derive"] }
-iso9660-rs = "1.0"
-gpt_disk_io = "0.16"
-gpt_disk_types = "0.16"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
