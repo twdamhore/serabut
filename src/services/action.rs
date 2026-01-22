@@ -69,51 +69,59 @@ impl ActionConfig {
         self.entries.contains_key(hostname)
     }
 
-    /// Mark installation complete by commenting out the hostname entry
-    pub fn mark_done(&mut self, hostname: &str) -> Result<(), AppError> {
-        if !self.path.exists() {
-            return Err(AppError::NotFound("action.cfg not found".to_string()));
-        }
+    /// Get the config file path
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 
-        let content = std::fs::read_to_string(&self.path)?;
-        let mut new_lines = Vec::new();
-        let mut found = false;
+    /// Remove hostname from in-memory entries (call after file is updated)
+    pub fn remove_entry(&mut self, hostname: &str) {
+        self.entries.remove(hostname);
+    }
+}
 
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && !trimmed.starts_with('#') {
-                if let Some((h, _)) = trimmed.split_once('=') {
-                    if h.trim() == hostname {
-                        new_lines.push(format!("# {}", line));
-                        found = true;
-                        continue;
-                    }
+/// Mark installation complete by commenting out the hostname entry in the file
+/// This is a standalone function to be called outside of locks with spawn_blocking
+pub fn mark_done_in_file(path: &Path, hostname: &str) -> Result<(), AppError> {
+    if !path.exists() {
+        return Err(AppError::NotFound("action.cfg not found".to_string()));
+    }
+
+    let content = std::fs::read_to_string(path)?;
+    let mut new_lines = Vec::new();
+    let mut found = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            if let Some((h, _)) = trimmed.split_once('=') {
+                if h.trim() == hostname {
+                    new_lines.push(format!("# {}", line));
+                    found = true;
+                    continue;
                 }
             }
-            new_lines.push(line.to_string());
         }
-
-        if !found {
-            return Err(AppError::NotFound(format!(
-                "Hostname '{}' not found in action.cfg",
-                hostname
-            )));
-        }
-
-        let new_content = new_lines.join("\n") + "\n";
-        std::fs::write(&self.path, &new_content)?;
-
-        // Validate the write by reading back
-        let written = std::fs::read_to_string(&self.path)?;
-        if written != new_content {
-            return Err(AppError::Internal(
-                "Write validation failed: file content mismatch".to_string(),
-            ));
-        }
-
-        // Remove from in-memory entries
-        self.entries.remove(hostname);
-
-        Ok(())
+        new_lines.push(line.to_string());
     }
+
+    if !found {
+        return Err(AppError::NotFound(format!(
+            "Hostname '{}' not found in action.cfg",
+            hostname
+        )));
+    }
+
+    let new_content = new_lines.join("\n") + "\n";
+    std::fs::write(path, &new_content)?;
+
+    // Validate the write by reading back
+    let written = std::fs::read_to_string(path)?;
+    if written != new_content {
+        return Err(AppError::Internal(
+            "Write validation failed: file content mismatch".to_string(),
+        ));
+    }
+
+    Ok(())
 }

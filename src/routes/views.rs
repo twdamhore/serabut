@@ -4,6 +4,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::Response;
 use serde::Deserialize;
+use tokio::task;
 
 use crate::config::AppState;
 use crate::error::AppError;
@@ -38,24 +39,17 @@ pub async fn get_view(
     // Build template context
     let context = state.build_template_context(&query.hostname, &host, port)?;
 
-    // Render template
-    let rendered = template::render_template(&template_path, &context)?;
-
-    // Determine content type
-    let content_type = if path.ends_with(".ipxe.j2") {
-        "text/plain"
-    } else if path.ends_with(".cfg.j2") {
-        "text/plain"
-    } else if path.ends_with(".j2") {
-        "text/plain"
-    } else {
-        "text/plain"
-    };
+    // Render template using spawn_blocking for sync file I/O
+    let rendered = task::spawn_blocking(move || {
+        template::render_template(template_path, context)
+    })
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))??;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_LENGTH, rendered.len())
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, "text/plain")
         .body(rendered.into())
         .unwrap())
 }

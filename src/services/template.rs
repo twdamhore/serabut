@@ -1,16 +1,17 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::PathBuf;
 
 use minijinja::{Environment, Value};
 
 use crate::error::AppError;
 
 /// Render a Jinja2 template file with the given context
+/// Takes owned values to support spawn_blocking
 pub fn render_template(
-    template_path: &Path,
-    context: &HashMap<String, String>,
+    template_path: PathBuf,
+    context: HashMap<String, String>,
 ) -> Result<String, AppError> {
-    let template_content = std::fs::read_to_string(template_path)?;
+    let template_content = std::fs::read_to_string(&template_path)?;
 
     let mut env = Environment::new();
     env.add_template("template", &template_content)?;
@@ -20,7 +21,7 @@ pub fn render_template(
     // Convert HashMap to minijinja Value
     let ctx: HashMap<&str, Value> = context
         .iter()
-        .map(|(k, v)| (k.as_str(), Value::from(v.clone())))
+        .map(|(k, v)| (k.as_str(), Value::from(v.as_str())))
         .collect();
 
     let rendered = template.render(ctx)?;
@@ -44,7 +45,7 @@ mod tests {
         ctx.insert("host".to_string(), "192.168.1.1".to_string());
         ctx.insert("port".to_string(), "8080".to_string());
 
-        let result = render_template(file.path(), &ctx).unwrap();
+        let result = render_template(file.path().to_path_buf(), ctx).unwrap();
         // MiniJinja preserves the trailing newline from the template
         assert!(result.starts_with("Hello testhost! Host: 192.168.1.1:8080"));
     }
