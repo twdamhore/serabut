@@ -1,44 +1,31 @@
-//! HTTP route handlers.
+use std::sync::Arc;
 
-pub mod action;
-pub mod boot;
-pub mod iso;
-
-use crate::config::AppState;
-use axum::body::Body;
-use axum::extract::ConnectInfo;
-use axum::http::Request;
-use axum::middleware::{self, Next};
-use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
-use std::net::SocketAddr;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
-/// HTTP request logging middleware.
-///
-/// Logs each request in format: "IP METHOD PATH - STATUS"
-async fn request_logging(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    request: Request<Body>,
-    next: Next,
-) -> Response {
-    let method = request.method().clone();
-    let uri = request.uri().clone();
+use crate::config::AppState;
 
-    let response = next.run(request).await;
+mod action;
+mod content;
+mod views;
 
-    let status = response.status();
-    tracing::info!("{} {} {} - {}", addr.ip(), method, uri, status.as_u16());
-
-    response
-}
-
-/// Create the application router with all routes.
-pub fn create_router(state: AppState) -> Router {
+pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/boot", get(boot::handle_boot))
-        .route("/iso/{iso_name}/{*path}", get(iso::handle_iso))
-        .route("/done/{mac}", get(action::handle_remove))
-        .layer(middleware::from_fn(request_logging))
+        // Content routes
+        .route("/content/iso/{release}/{*path}", get(content::get_iso_content))
+        .route("/content/combine/{name}", get(content::get_combined_content))
+        .route("/content/raw/{release}/{filename}", get(content::get_raw_content))
+        // Views route
+        .route("/views/{*path}", get(views::get_view))
+        // Action routes
+        .route("/action/boot/{mac}", get(action::get_boot))
+        .route("/action/done/{mac}", get(action::mark_done))
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        )
         .with_state(state)
 }

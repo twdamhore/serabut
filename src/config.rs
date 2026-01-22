@@ -1,272 +1,186 @@
-//! Configuration management for serabutd.
-//!
-//! Handles parsing of /etc/serabutd.conf and runtime configuration.
-
-use std::net::IpAddr;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
-/// Application configuration.
-#[derive(Debug, Clone)]
+use crate::error::AppError;
+use crate::services::action::ActionConfig;
+use crate::services::aliases::AliasesConfig;
+use crate::services::combine::CombineConfig;
+use crate::services::hardware::HardwareConfig;
+
+const DEFAULT_CONFIG_PATH: &str = "/etc/serabutd.conf";
+const DEFAULT_DATA_DIR: &str = "/var/lib/serabutd";
+const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
+const DEFAULT_PORT: u16 = 8080;
+
+#[derive(Debug)]
 pub struct Config {
-    /// Interface to bind to (default: 0.0.0.0)
-    pub interface: IpAddr,
-    /// Port to listen on (default: 4123)
+    pub data_dir: PathBuf,
+    pub bind_address: String,
     pub port: u16,
-    /// Log level (default: info)
-    pub log_level: LogLevel,
-    /// Base path for data files (default: /var/lib/serabutd)
-    pub config_path: PathBuf,
-}
-
-/// Log level configuration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LogLevel {
-    Error,
-    Warn,
-    Info,
-    Debug,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            interface: IpAddr::from([0, 0, 0, 0]),
-            port: 4123,
-            log_level: LogLevel::Info,
-            config_path: PathBuf::from("/var/lib/serabutd"),
-        }
-    }
 }
 
 impl Config {
-    /// Load configuration from file.
-    ///
-    /// If the file doesn't exist, returns default configuration.
-    pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        if !path.exists() {
-            tracing::info!("Config file not found at {:?}, using defaults", path);
-            return Ok(Self::default());
-        }
+    pub fn load() -> Result<Self, AppError> {
+        let config_path = std::env::var("SERABUTD_CONFIG")
+            .unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_string());
 
-        let content = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+        let mut data_dir = PathBuf::from(DEFAULT_DATA_DIR);
+        let mut bind_address = DEFAULT_BIND_ADDRESS.to_string();
+        let mut port = DEFAULT_PORT;
 
-        Self::parse(&content, path)
-    }
-
-    /// Parse configuration from string content.
-    fn parse(content: &str, path: &Path) -> Result<Self, ConfigError> {
-        let mut config = Self::default();
-
-        for (line_num, line) in content.lines().enumerate() {
-            let line = line.trim();
-
-            // Skip empty lines and comments
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let (key, value) = parse_key_value(line).ok_or_else(|| ConfigError::ParseError {
-                path: path.to_path_buf(),
-                line: line_num + 1,
-                message: format!("Invalid line format: {}", line),
-            })?;
-
-            match key {
-                "interface" => {
-                    config.interface =
-                        IpAddr::from_str(value).map_err(|_| ConfigError::ParseError {
-                            path: path.to_path_buf(),
-                            line: line_num + 1,
-                            message: format!("Invalid interface address: {}", value),
-                        })?;
+        if Path::new(&config_path).exists() {
+            let content = std::fs::read_to_string(&config_path)?;
+            for line in content.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
                 }
-                "port" => {
-                    config.port = value.parse().map_err(|_| ConfigError::ParseError {
-                        path: path.to_path_buf(),
-                        line: line_num + 1,
-                        message: format!("Invalid port number: {}", value),
-                    })?;
-                }
-                "log_level" => {
-                    config.log_level =
-                        LogLevel::from_str(value).map_err(|_| ConfigError::ParseError {
-                            path: path.to_path_buf(),
-                            line: line_num + 1,
-                            message: format!("Invalid log level: {}", value),
-                        })?;
-                }
-                "config_path" => {
-                    config.config_path = PathBuf::from(value);
-                }
-                _ => {
-                    tracing::warn!("Unknown config key '{}' at line {}", key, line_num + 1);
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim();
+                    match key {
+                        "data_dir" => data_dir = PathBuf::from(value),
+                        "bind_address" => bind_address = value.to_string(),
+                        "port" => {
+                            port = value.parse().map_err(|_| {
+                                AppError::Config(format!("Invalid port: {}", value))
+                            })?;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
-        Ok(config)
-    }
-
-    /// Get the tracing filter string for this log level.
-    pub fn tracing_filter(&self) -> &'static str {
-        match self.log_level {
-            LogLevel::Error => "error",
-            LogLevel::Warn => "warn",
-            LogLevel::Info => "info",
-            LogLevel::Debug => "debug",
+        // Allow environment variable overrides
+        if let Ok(val) = std::env::var("SERABUTD_DATA_DIR") {
+            data_dir = PathBuf::from(val);
         }
-    }
-}
-
-impl FromStr for LogLevel {
-    type Err = ();
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "error" => Ok(LogLevel::Error),
-            "warn" | "warning" => Ok(LogLevel::Warn),
-            "info" => Ok(LogLevel::Info),
-            "debug" => Ok(LogLevel::Debug),
-            _ => Err(()),
+        if let Ok(val) = std::env::var("SERABUTD_BIND_ADDRESS") {
+            bind_address = val;
         }
-    }
-}
-
-/// Parse a key=value line.
-fn parse_key_value(line: &str) -> Option<(&str, &str)> {
-    let mut parts = line.splitn(2, '=');
-    let key = parts.next()?.trim();
-    let value = parts.next()?.trim();
-    if key.is_empty() {
-        return None;
-    }
-    Some((key, value))
-}
-
-/// Configuration error types.
-#[derive(Debug)]
-pub enum ConfigError {
-    ReadError {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    ParseError {
-        path: PathBuf,
-        line: usize,
-        message: String,
-    },
-}
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::ReadError { path, source } => {
-                write!(f, "Failed to read config file {:?}: {}", path, source)
-            }
-            ConfigError::ParseError {
-                path,
-                line,
-                message,
-            } => {
-                write!(f, "Config parse error in {:?} at line {}: {}", path, line, message)
-            }
+        if let Ok(val) = std::env::var("SERABUTD_PORT") {
+            port = val
+                .parse()
+                .map_err(|_| AppError::Config(format!("Invalid SERABUTD_PORT: {}", val)))?;
         }
-    }
-}
 
-impl std::error::Error for ConfigError {}
-
-/// Shared application state that can be reloaded.
-#[derive(Clone)]
-pub struct AppState {
-    config: Arc<RwLock<Config>>,
-    config_path: PathBuf,
-}
-
-impl AppState {
-    /// Create new application state from config file path.
-    pub fn new(config_path: PathBuf) -> Result<Self, ConfigError> {
-        let config = Config::load(&config_path)?;
-        Ok(Self {
-            config: Arc::new(RwLock::new(config)),
-            config_path,
+        Ok(Config {
+            data_dir,
+            bind_address,
+            port,
         })
     }
 
-    /// Get current configuration.
-    pub async fn config(&self) -> Config {
-        self.config.read().await.clone()
+    pub fn iso_dir(&self) -> PathBuf {
+        self.data_dir.join("iso")
     }
 
-    /// Reload configuration from disk.
-    pub async fn reload(&self) -> Result<(), ConfigError> {
-        let new_config = Config::load(&self.config_path)?;
-        let mut config = self.config.write().await;
-        *config = new_config;
-        tracing::info!("Configuration reloaded");
-        Ok(())
+    pub fn views_dir(&self) -> PathBuf {
+        self.data_dir.join("views")
+    }
+
+    pub fn hardware_dir(&self) -> PathBuf {
+        self.data_dir.join("hardware")
+    }
+
+    pub fn aliases_path(&self) -> PathBuf {
+        self.data_dir.join("aliases.cfg")
+    }
+
+    pub fn combine_path(&self) -> PathBuf {
+        self.data_dir.join("combine.cfg")
+    }
+
+    pub fn action_path(&self) -> PathBuf {
+        self.data_dir.join("action.cfg")
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub struct AppState {
+    pub config: Config,
+    pub aliases: AliasesConfig,
+    pub combine: CombineConfig,
+    pub action: RwLock<ActionConfig>,
+    pub hardware: HardwareConfig,
+}
 
-    #[test]
-    fn test_default_config() {
-        let config = Config::default();
-        assert_eq!(config.interface, IpAddr::from([0, 0, 0, 0]));
-        assert_eq!(config.port, 4123);
-        assert_eq!(config.log_level, LogLevel::Info);
+impl AppState {
+    pub fn new(config: Config) -> Result<Self, AppError> {
+        let aliases = AliasesConfig::load(&config.aliases_path())?;
+        let combine = CombineConfig::load(&config.combine_path())?;
+        let action = ActionConfig::load(&config.action_path())?;
+        let hardware = HardwareConfig::load(&config.hardware_dir())?;
+
+        Ok(AppState {
+            config,
+            aliases,
+            combine,
+            action: RwLock::new(action),
+            hardware,
+        })
     }
 
-    #[test]
-    fn test_parse_config() {
-        let content = r#"
-            interface=192.168.1.1
-            port=8080
-            log_level=debug
-        "#;
-        let config = Config::parse(content, Path::new("test.conf")).unwrap();
-        assert_eq!(config.interface, IpAddr::from([192, 168, 1, 1]));
-        assert_eq!(config.port, 8080);
-        assert_eq!(config.log_level, LogLevel::Debug);
+    /// Derive OS family from release name
+    pub fn derive_os(release: &str) -> &'static str {
+        match release.split('-').next() {
+            Some("debian") | Some("ubuntu") | Some("rocky") | Some("alma") | Some("centos") => {
+                "linux"
+            }
+            Some("freebsd") | Some("openbsd") | Some("netbsd") => "bsd",
+            _ => "unknown",
+        }
     }
 
-    #[test]
-    fn test_parse_config_with_comments() {
-        let content = r#"
-            # This is a comment
-            interface=10.0.0.1
-            # Another comment
-            port=9000
-        "#;
-        let config = Config::parse(content, Path::new("test.conf")).unwrap();
-        assert_eq!(config.interface, IpAddr::from([10, 0, 0, 1]));
-        assert_eq!(config.port, 9000);
+    /// Derive distro from release name
+    pub fn derive_distro(release: &str) -> &'static str {
+        match release.split('-').next() {
+            Some("debian") => "debian",
+            Some("ubuntu") => "ubuntu",
+            Some("rocky") => "rocky",
+            Some("alma") => "alma",
+            Some("centos") => "centos",
+            Some("freebsd") => "freebsd",
+            Some("openbsd") => "openbsd",
+            Some("netbsd") => "netbsd",
+            _ => "unknown",
+        }
     }
 
-    #[test]
-    fn test_parse_key_value() {
-        assert_eq!(parse_key_value("key=value"), Some(("key", "value")));
-        assert_eq!(parse_key_value("key = value"), Some(("key", "value")));
-        assert_eq!(parse_key_value("key="), Some(("key", "")));
-        assert_eq!(parse_key_value("=value"), None);
-        assert_eq!(parse_key_value("no equals"), None);
-    }
+    /// Build template context for rendering
+    pub fn build_template_context(
+        &self,
+        hostname: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<HashMap<String, String>, AppError> {
+        let mut ctx = HashMap::new();
 
-    #[test]
-    fn test_log_level_from_str() {
-        assert_eq!(LogLevel::from_str("error"), Ok(LogLevel::Error));
-        assert_eq!(LogLevel::from_str("WARN"), Ok(LogLevel::Warn));
-        assert_eq!(LogLevel::from_str("Info"), Ok(LogLevel::Info));
-        assert_eq!(LogLevel::from_str("debug"), Ok(LogLevel::Debug));
-        assert!(LogLevel::from_str("invalid").is_err());
+        // Server info
+        ctx.insert("host".to_string(), host.to_string());
+        ctx.insert("port".to_string(), port.to_string());
+        ctx.insert("hostname".to_string(), hostname.to_string());
+
+        // Hardware config
+        if let Some(hw) = self.hardware.get(hostname) {
+            for (k, v) in hw {
+                ctx.insert(k.clone(), v.clone());
+            }
+        }
+
+        // Action config
+        let action = self.action.read().map_err(|_| {
+            AppError::Config("Failed to read action config".to_string())
+        })?;
+
+        if let Some((release, automation)) = action.get(hostname) {
+            ctx.insert("release".to_string(), release.clone());
+            ctx.insert("automation".to_string(), automation.clone());
+            ctx.insert("os".to_string(), Self::derive_os(&release).to_string());
+            ctx.insert("distro".to_string(), Self::derive_distro(&release).to_string());
+        }
+
+        Ok(ctx)
     }
 }
