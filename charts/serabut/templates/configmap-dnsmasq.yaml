@@ -35,30 +35,30 @@ data:
 
     # Generate dnsmasq config
     cat > /etc/dnsmasq.conf <<EOF
-    # Disable DNS
-    port=0
+# Disable DNS
+port=0
 
-    # Logging
-    log-dhcp
+# Logging
+log-dhcp
 
-    # proxyDHCP mode - work alongside existing DHCP server
-    dhcp-range=${NETWORK_PREFIX}.0,proxy
+# proxyDHCP mode - work alongside existing DHCP server
+dhcp-range=${NETWORK_PREFIX}.0,proxy
 
-    # Detect iPXE (client sends user-class "iPXE")
-    dhcp-userclass=set:ipxe,iPXE
+# Detect iPXE (client sends user-class "iPXE")
+dhcp-userclass=set:ipxe,iPXE
 
-    # UEFI boot - first stage: serve ipxe.efi via TFTP
-    dhcp-match=set:efi64,option:client-arch,7
-    dhcp-match=set:efi64,option:client-arch,9
-    dhcp-boot=tag:efi64,tag:!ipxe,ipxe.efi,,${MY_IP}
+# UEFI boot - first stage: serve ipxe.efi via TFTP
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-match=set:efi64,option:client-arch,9
+dhcp-boot=tag:efi64,tag:!ipxe,ipxe.efi,,${MY_IP}
 
-    # Second stage: iPXE chains to HTTP boot script
-    dhcp-boot=tag:ipxe,http://${MY_IP}:${HTTP_PORT}/boot/${BOOT_DISTRO}
+# Second stage: iPXE chains to HTTP boot script
+dhcp-boot=tag:ipxe,http://${MY_IP}:${HTTP_PORT}/boot/${BOOT_DISTRO}
 
-    # Enable TFTP
-    enable-tftp
-    tftp-root=${TFTP_ROOT}
-    EOF
+# Enable TFTP
+enable-tftp
+tftp-root=${TFTP_ROOT}
+EOF
 
     echo "Generated dnsmasq.conf with IP: $MY_IP"
 
