@@ -36,9 +36,18 @@ Client UEFI PXE
 
 ## Prerequisites
 
-### 1. Multus CNI
+### 1. Multus CNI + DHCP CNI Daemon
 
 Required for attaching pod to physical network (192.168.88.0/24).
+
+The DHCP CNI daemon must be running on each node for macvlan DHCP to work:
+
+```bash
+# The dhcp daemon is part of CNI plugins, typically at:
+/opt/cni/bin/dhcp daemon &
+```
+
+Or run it as a DaemonSet. See [CNI DHCP plugin documentation](https://www.cni.dev/plugins/current/ipam/dhcp/).
 
 ### 2. Node Labeling
 

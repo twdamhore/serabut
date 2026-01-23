@@ -15,10 +15,11 @@ dnsmasq:
   tftpRoot: /tftp
 
 # HTTP server container (Go app)
+# TODO: Replace with actual Go server image once built
 httpServer:
   image:
-    repository: ghcr.io/twdamhore/serabut-http
-    tag: "0.1.0"
+    repository: nginx
+    tag: "alpine"
   port: 8080
 
 # Squid container (caching proxy)
