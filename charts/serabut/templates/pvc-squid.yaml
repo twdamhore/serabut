@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "serabut.fullname" . }}-squid
+  labels:
+    {{- include "serabut.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.squid.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.squid.size }}

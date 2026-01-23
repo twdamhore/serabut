@@ -1,0 +1,49 @@
+# Network configuration
+network:
+  # Interface name on nodes connected to PXE network
+  # Nodes must be labeled: serabut/interface=<interface>
+  interface: enp1s0
+  # Network CIDR for Multus
+  cidr: 192.168.88.0/24
+
+# dnsmasq container (proxyDHCP + TFTP)
+dnsmasq:
+  image:
+    repository: alpine
+    tag: "3.21"
+  # TFTP root directory
+  tftpRoot: /tftp
+
+# HTTP server container (Go app)
+# TODO: Replace with actual Go server image once built
+httpServer:
+  image:
+    repository: nginx
+    tag: "alpine"
+  port: 8080
+
+# Squid container (caching proxy)
+squid:
+  image:
+    repository: alpine
+    tag: "3.21"
+  port: 3128
+  # Cache size in MB
+  cacheSize: 8000
+
+# Boot configuration
+boot:
+  # Default distro for iPXE chain
+  defaultDistro: debian-12
+
+# Storage
+storage:
+  iso:
+    storageClass: iso
+    size: 10Gi
+  squid:
+    storageClass: squid
+    size: 10Gi
+
+# Node selector based on interface label
+nodeSelector: {}

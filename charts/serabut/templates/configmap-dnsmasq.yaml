@@ -1,0 +1,66 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "serabut.fullname" . }}-dnsmasq
+  labels:
+    {{- include "serabut.labels" . | nindent 4 }}
+data:
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+
+    TFTP_ROOT="{{ .Values.dnsmasq.tftpRoot }}"
+    HTTP_PORT="{{ .Values.httpServer.port }}"
+    BOOT_DISTRO="{{ .Values.boot.defaultDistro }}"
+    NETWORK_PREFIX="{{ .Values.network.cidr | trimSuffix ".0/24" }}"
+
+    # Install dnsmasq and wget
+    apk add --no-cache dnsmasq wget
+
+    # Download iPXE UEFI bootloader
+    echo "Downloading iPXE..."
+    mkdir -p "$TFTP_ROOT"
+    wget -q -O "$TFTP_ROOT/ipxe.efi" https://boot.ipxe.org/ipxe.efi
+    echo "iPXE downloaded to $TFTP_ROOT/ipxe.efi"
+
+    # Wait for network interface to get IP
+    echo "Waiting for IP address..."
+    while ! ip addr show net1 | grep -q 'inet '; do
+      sleep 1
+    done
+
+    # Get assigned IP
+    MY_IP=$(ip addr show net1 | grep 'inet ' | awk '{print $2}' | cut -d/ -f1)
+    echo "Got IP: $MY_IP"
+
+    # Generate dnsmasq config
+    cat > /etc/dnsmasq.conf <<EOF
+# Disable DNS
+port=0
+
+# Logging
+log-dhcp
+
+# proxyDHCP mode - work alongside existing DHCP server
+dhcp-range=${NETWORK_PREFIX}.0,proxy
+
+# Detect iPXE (client sends user-class "iPXE")
+dhcp-userclass=set:ipxe,iPXE
+
+# UEFI boot - first stage: serve ipxe.efi via TFTP
+dhcp-match=set:efi64,option:client-arch,7
+dhcp-match=set:efi64,option:client-arch,9
+dhcp-boot=tag:efi64,tag:!ipxe,ipxe.efi,,${MY_IP}
+
+# Second stage: iPXE chains to HTTP boot script
+dhcp-boot=tag:ipxe,http://${MY_IP}:${HTTP_PORT}/boot/${BOOT_DISTRO}
+
+# Enable TFTP
+enable-tftp
+tftp-root=${TFTP_ROOT}
+EOF
+
+    echo "Generated dnsmasq.conf with IP: $MY_IP"
+
+    # Start dnsmasq in foreground
+    exec dnsmasq -k -C /etc/dnsmasq.conf
