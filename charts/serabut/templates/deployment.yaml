@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "serabut.fullname" . }}
+  labels:
+    {{- include "serabut.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "serabut.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: |
+          [{
+            "name": "{{ include "serabut.nadName" . }}",
+            "interface": "net1",
+            "default-route": ["{{ .Values.network.cidr | trimSuffix "/24" | trimSuffix ".0" }}.1"]
+          }]
+      labels:
+        {{- include "serabut.selectorLabels" . | nindent 8 }}
+    spec:
+      # Only schedule on nodes with the correct interface label
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: serabut/interface
+                    operator: In
+                    values:
+                      - {{ .Values.network.interface }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        # dnsmasq - proxyDHCP + TFTP
+        - name: dnsmasq
+          image: "{{ .Values.dnsmasq.image.repository }}:{{ .Values.dnsmasq.image.tag }}"
+          command: ["/bin/sh", "/scripts/entrypoint.sh"]
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+                - NET_RAW
+          volumeMounts:
+            - name: dnsmasq-config
+              mountPath: /scripts/entrypoint.sh
+              subPath: entrypoint.sh
+            - name: tftp
+              mountPath: {{ .Values.dnsmasq.tftpRoot }}
+
+        # HTTP server - ISO serving, firmware injection, boot configs
+        - name: http
+          image: "{{ .Values.httpServer.image.repository }}:{{ .Values.httpServer.image.tag }}"
+          ports:
+            - name: http
+              containerPort: {{ .Values.httpServer.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: iso
+              mountPath: /data/iso
+
+        # Squid - caching proxy
+        - name: squid
+          image: "{{ .Values.squid.image.repository }}:{{ .Values.squid.image.tag }}"
+          command: ["/bin/sh", "/scripts/entrypoint.sh"]
+          ports:
+            - name: squid
+              containerPort: {{ .Values.squid.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: squid-config
+              mountPath: /etc/squid/squid.conf
+              subPath: squid.conf
+            - name: squid-config
+              mountPath: /scripts/entrypoint.sh
+              subPath: entrypoint.sh
+            - name: squid-cache
+              mountPath: /var/spool/squid
+
+      volumes:
+        - name: dnsmasq-config
+          configMap:
+            name: {{ include "serabut.fullname" . }}-dnsmasq
+            defaultMode: 0755
+        - name: squid-config
+          configMap:
+            name: {{ include "serabut.fullname" . }}-squid
+            defaultMode: 0755
+        - name: tftp
+          emptyDir: {}
+        - name: iso
+          persistentVolumeClaim:
+            claimName: {{ include "serabut.fullname" . }}-iso
+        - name: squid-cache
+          persistentVolumeClaim:
+            claimName: {{ include "serabut.fullname" . }}-squid

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: serabut
+description: PXE boot infrastructure for Kubernetes
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - pxe
+  - netboot
+  - ipxe
+  - dnsmasq
+  - tftp
+maintainers:
+  - name: twdamhore

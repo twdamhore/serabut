@@ -1,0 +1,61 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "serabut.fullname" . }}-squid
+  labels:
+    {{- include "serabut.labels" . | nindent 4 }}
+data:
+  squid.conf: |
+    # Squid caching proxy for Debian package downloads
+
+    # Listen on all interfaces
+    http_port {{ .Values.squid.port }}
+
+    # Cache directory
+    cache_dir ufs /var/spool/squid {{ .Values.squid.cacheSize }} 16 256
+
+    # Cache large files (Debian packages)
+    maximum_object_size 1 GB
+
+    # Memory cache
+    cache_mem 256 MB
+
+    # ACLs
+    acl localnet src {{ .Values.network.cidr }}
+    acl SSL_ports port 443
+    acl Safe_ports port 80
+    acl Safe_ports port 443
+
+    # Allow local network
+    http_access allow localnet
+    http_access deny all
+
+    # Refresh patterns for Debian mirrors
+    refresh_pattern deb$   129600 100% 129600
+    refresh_pattern udeb$  129600 100% 129600
+    refresh_pattern tar.gz$  129600 100% 129600
+    refresh_pattern tar.xz$  129600 100% 129600
+    refresh_pattern Release$  0 0% 0 refresh-ims
+    refresh_pattern Packages$  0 0% 0 refresh-ims
+    refresh_pattern .  0 20% 4320
+
+    # Logs
+    access_log /var/log/squid/access.log
+    cache_log /var/log/squid/cache.log
+
+  entrypoint.sh: |
+    #!/bin/sh
+    set -e
+
+    # Install squid
+    apk add --no-cache squid
+
+    # Create cache directories
+    mkdir -p /var/spool/squid /var/log/squid
+    chown -R squid:squid /var/spool/squid /var/log/squid
+
+    # Initialize cache
+    squid -N -z -f /etc/squid/squid.conf
+
+    # Start squid in foreground
+    exec squid -N -f /etc/squid/squid.conf
